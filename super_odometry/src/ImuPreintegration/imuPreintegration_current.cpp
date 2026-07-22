@@ -238,9 +238,12 @@ namespace super_odometry {
             // Z-up convention: gravity points in -Z direction
             preint_params_ = gtsam::PreintegrationParams::MakeSharedU(config_.imuGravity);
         }
-        // Set gravity vector using the computed direction (more accurate than assuming pure Z)
+        // Set gravity using the direction estimated from the initialized IMU and
+        // first LiDAR pose instead of discarding its X/Y components.
         preint_params_->n_gravity = gtsam::Vector3(
-        0,0,config_.imuGravity);
+            g_world_dir.x() * config_.imuGravity,
+            g_world_dir.y() * config_.imuGravity,
+            g_world_dir.z() * config_.imuGravity);
         preint_params_->accelerometerCovariance =
             gtsam::Matrix33::Identity(3, 3) * pow(config_.imuAccNoise, 2);
         preint_params_->gyroscopeCovariance =

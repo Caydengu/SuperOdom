@@ -1,0 +1,49 @@
+/**:
+  ros__parameters:
+    imu_topic: "/livox/imu"
+    laser_topic: "/livox/lidar"
+    odom_topic: "/state_estimation"
+    sensor: "livox"
+    use_imu_roll_pitch: false
+
+    world_frame: "map"
+    world_frame_rot: "map_rot"
+    sensor_frame: "sensor"
+    sensor_frame_rot: "sensor_rot"
+
+    imu_acc_x_limit: 5.0
+    imu_acc_y_limit: 5.0
+    imu_acc_z_limit: 5.0
+
+    # Legacy replay profile only. The 2 m rejection radius removes the
+    # robot-attached support gantry observed in the April 2026 bags. It must
+    # never filter the raw terrain cloud consumed by a height-map builder.
+    feature_extraction_node:
+        scan_line: 4
+        min_range: 2.0
+        filter_point_size: 1
+        mapping_skip_frame: 1
+
+    laser_mapping_node:
+        mapping_line_resolution: 0.2
+        mapping_plane_resolution: 0.4
+        max_iterations: 4
+        max_surface_features: 2000
+
+        localization_mode: false
+        read_pose_file: false
+        init_x: 0.0
+        init_y: 0.0
+        init_z: 0.0
+        init_roll: 0.0
+        init_pitch: 0.0
+        init_yaw: 0.0
+
+    imu_preintegration_node:
+        lidar_correction_noise: 0.01
+
+        acc_n: 3.9939570888238808e-03
+        gyr_n: 1.5636343949698187e-03
+        acc_w: 6.4356659353532566e-05
+        gyr_w: 3.5640318696367613e-05
+        g_norm: 9.80511

@@ -292,10 +292,10 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     node->declare_parameter<std::string>("sensor_frame_rot", "sensor_rot");
     node->declare_parameter<std::string>("PROJECT_NAME", "");
     node->declare_parameter<std::string>("sensor", "livox");
-    node->declare_parameter<double>("imu_acc_x_limit", 0.5);
-    node->declare_parameter<double>("imu_acc_y_limit", 0.2);
-    node->declare_parameter<double>("imu_acc_z_limit", 0.4);
-    // node->declare_parameter<bool>("use_imu_roll_pitch", false);
+    node->declare_parameter<double>("imu_acc_x_limit", 5.0);
+    node->declare_parameter<double>("imu_acc_y_limit", 5.0);
+    node->declare_parameter<double>("imu_acc_z_limit", 5.0);
+    node->declare_parameter<bool>("use_imu_roll_pitch", false);
 
     
     LASER_TOPIC = node->get_parameter("laser_topic").as_string();
@@ -309,7 +309,7 @@ bool readGlobalparam(rclcpp::Node::SharedPtr node)
     SENSOR_FRAME_ROT = node->get_parameter("sensor_frame_rot").as_string();
     ProjectName = node->get_parameter("PROJECT_NAME").as_string();
     SENSOR = node->get_parameter("sensor").as_string();
-    // USE_IMU_ROLL_PITCH = node->get_parameter("use_imu_roll_pitch").as_bool();
+    USE_IMU_ROLL_PITCH = node->get_parameter("use_imu_roll_pitch").as_bool();
     IMU_ACC_X_LIMIT = node->get_parameter("imu_acc_x_limit").as_double();
     IMU_ACC_Y_LIMIT = node->get_parameter("imu_acc_y_limit").as_double();
     IMU_ACC_Z_LIMIT = node->get_parameter("imu_acc_z_limit").as_double();

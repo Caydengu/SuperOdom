@@ -3,9 +3,9 @@ import os
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-import launch_ros
+from launch_ros.parameter_descriptions import ParameterValue
 
 def get_share_file(package_name, file_name):
     return os.path.join(get_package_share_directory(package_name), file_name)
@@ -19,7 +19,15 @@ def generate_launch_description():
         file_name="config/livox/livox_mid360_calibration.yaml"
     )
     home_directory = os.path.expanduser("~")
-    
+
+    # Live operation is the fail-safe default. Offline replay must opt in with
+    # use_sim_time:=true and provide /clock from ros2 bag play --clock.
+    use_sim_time_arg = DeclareLaunchArgument("use_sim_time",
+        default_value="false",
+        description="Use /clock for offline replay",
+    )
+    use_sim_time = ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)
+
     config_path_arg = DeclareLaunchArgument(
         "config_file",
         default_value=config_path,
@@ -57,9 +65,13 @@ def generate_launch_description():
             "stdout": "log",
             "stderr": "log",
         },
-        parameters=[LaunchConfiguration("config_file"),
-            { "calibration_file": LaunchConfiguration("calibration_file"),
-        }],
+        parameters=[
+            LaunchConfiguration("config_file"),
+            {
+                "calibration_file": LaunchConfiguration("calibration_file"),
+                "use_sim_time": use_sim_time,
+            },
+        ],
     )
 
     laser_mapping_node = Node(
@@ -69,10 +81,14 @@ def generate_launch_description():
             "stdout": "log",
             "stderr": "log",
         },
-        parameters=[LaunchConfiguration("config_file"),
-            { "calibration_file": LaunchConfiguration("calibration_file"),
-             "map_dir": os.path.join(home_directory, "/path/to/your/pcd"),
-        }],
+        parameters=[
+            LaunchConfiguration("config_file"),
+            {
+                "calibration_file": LaunchConfiguration("calibration_file"),
+                "map_dir": os.path.join(home_directory, "/path/to/your/pcd"),
+                "use_sim_time": use_sim_time,
+            },
+        ],
         remappings=[
             ("laser_odom_to_init", LaunchConfiguration("odom_topic")),
         ]
@@ -85,14 +101,18 @@ def generate_launch_description():
             "stdout": "screen",
             "stderr": "screen",
         },
-        parameters=[LaunchConfiguration("config_file"),
-            { "calibration_file": LaunchConfiguration("calibration_file")
-        }],
+        parameters=[
+            LaunchConfiguration("config_file"),
+            {
+                "calibration_file": LaunchConfiguration("calibration_file"),
+                "use_sim_time": use_sim_time,
+            },
+        ],
     )
 
 
     return LaunchDescription([
-        launch_ros.actions.SetParameter(name='use_sim_time', value='false'),
+        use_sim_time_arg,
         config_path_arg,
         calib_path_arg,
         odom_topic_arg,

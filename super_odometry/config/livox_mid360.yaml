@@ -2,8 +2,10 @@
   ros__parameters:
     imu_topic: "/livox/imu"
     laser_topic: "/livox/lidar"
-    odom_topic: "/state_estimation2"
+    # Must match the imuPreintegration publisher (ProjectName + "/state_estimation").
+    odom_topic: "/state_estimation"
     sensor: "livox"
+    # The Mid-360 driver does not populate a usable orientation quaternion.
     use_imu_roll_pitch: false
 
     world_frame: "map"
@@ -11,14 +13,17 @@
     sensor_frame: "sensor"
     sensor_frame_rot: "sensor_rot"
 
-    imu_acc_x_limit: 0.5
-    imu_acc_y_limit: 0.2
-    imu_acc_z_limit: 0.4
+    # Humanoid gait accelerations exceed the original ground-robot thresholds.
+    imu_acc_x_limit: 5.0
+    imu_acc_y_limit: 5.0
+    imu_acc_z_limit: 5.0
 
     # Feature Extraction Params
     feature_extraction_node:
-        scan_line: 4 
-        min_range: 0.5    #<!-- remove too closed points -->
+        scan_line: 4
+        # Keep near terrain for the normal live profile. The legacy gantry
+        # regression has a separate, explicitly selected 2.0 m profile.
+        min_range: 0.5
         filter_point_size: 1
         mapping_skip_frame: 1
 
