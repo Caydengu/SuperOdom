@@ -36,6 +36,12 @@ def test_replay_time_is_explicit_and_live_default_is_safe() -> None:
     assert 'default_value="false"' in launch
     assert '"use_sim_time": use_sim_time' in launch
     assert "use_sim_time:=true" in replay
+    assert "assert_process_sim_time" in replay
+    assert '"/proc/$pid/cmdline"' in replay
+    assert "ros2 param get" not in replay
+    assert "assert_recorder_clock_endpoint" in replay
+    assert "Node name: rosbag2_recorder" in replay
+    assert "ros2 topic pub" not in replay
 
 
 def test_dependency_lock_contains_full_revisions() -> None:
@@ -59,8 +65,20 @@ def test_dockerfile_is_cpu_only_and_pinned() -> None:
     assert "humble-ros-base-jammy" in dockerfile
     assert "rmw-cyclonedds-cpp" in dockerfile
     assert "--packages-select" in dockerfile
+    assert "replay_smoke.sh" in dockerfile
+    assert "superodom-replay-smoke" in dockerfile
     for forbidden in ("desktop-full", "nvidia", "rviz", "plotjuggler", "x11"):
         assert forbidden not in lowered
+
+
+def test_entrypoint_enables_nounset_only_after_ros_setup() -> None:
+    entrypoint = read("docker/humble-minimal/entrypoint.sh")
+
+    ros_setup = entrypoint.index("source /opt/ros/humble/setup.bash")
+    workspace_setup = entrypoint.index('source "$workspace_setup"')
+    nounset = entrypoint.index("set -u")
+    assert "set -euo pipefail" not in entrypoint[:ros_setup]
+    assert nounset > workspace_setup > ros_setup
 
 
 def test_runtime_wrapper_drops_privilege_and_gpu_requirements(tmp_path: Path) -> None:

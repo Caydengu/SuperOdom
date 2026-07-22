@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 
 source /opt/ros/humble/setup.bash
 
@@ -10,5 +10,5 @@ if [[ ! -r "$workspace_setup" ]]; then
 fi
 source "$workspace_setup"
 
+set -u
 exec "$@"
-

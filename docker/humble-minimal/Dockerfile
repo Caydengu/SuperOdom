@@ -61,8 +61,7 @@ RUN test -n "${SOPHUS_REVISION}" \
     && git -C Sophus checkout --detach "${SOPHUS_REVISION}" \
     && cmake -S Sophus -B Sophus/build \
          -DCMAKE_BUILD_TYPE=Release \
-         -DBUILD_SOPHUS_TESTS=OFF \
-         -DBUILD_SOPHUS_EXAMPLES=OFF \
+         -DBUILD_TESTS=OFF \
     && cmake --build Sophus/build --parallel "$(nproc)" \
     && cmake --install Sophus/build \
     && rm -rf Sophus
@@ -111,10 +110,10 @@ RUN source /opt/ros/humble/setup.bash \
     && rm -rf build log src/livox_ros_driver2/.git
 
 COPY docker/humble-minimal/entrypoint.sh /usr/local/bin/superodom-entrypoint
-RUN chmod 0755 /usr/local/bin/superodom-entrypoint
+COPY docker/humble-minimal/replay_smoke.sh /usr/local/bin/superodom-replay-smoke
+RUN chmod 0755 /usr/local/bin/superodom-entrypoint /usr/local/bin/superodom-replay-smoke
 
 ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 WORKDIR /output
 ENTRYPOINT ["/usr/local/bin/superodom-entrypoint"]
 CMD ["bash"]
-

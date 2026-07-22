@@ -72,6 +72,67 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+find_process() {
+  local executable=$1
+  local cmdline pid
+  local -a process_args
+  for cmdline in /proc/[0-9]*/cmdline; do
+    [[ -r "$cmdline" ]] || continue
+    process_args=()
+    mapfile -d '' -t process_args < "$cmdline" || true
+    if [[ "${process_args[0]:-}" == "/opt/superodom_ws/install/lib/super_odometry/$executable" ]]; then
+      pid=${cmdline#/proc/}
+      printf '%s\n' "${pid%/cmdline}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+assert_process_sim_time() {
+  local executable=$1
+  local pid param_file found=false
+  local -a process_args
+  pid="$(find_process "$executable")" || {
+    echo "Could not locate process for $executable" >&2
+    return 1
+  }
+  mapfile -d '' -t process_args < "/proc/$pid/cmdline"
+  for (( index=0; index + 1 < ${#process_args[@]}; index++ )); do
+    if [[ "${process_args[$index]}" != "--params-file" ]]; then
+      continue
+    fi
+    param_file=${process_args[$((index + 1))]}
+    if [[ -r "$param_file" ]] && grep -Eq 'use_sim_time:[[:space:]]*true' "$param_file"; then
+      found=true
+      break
+    fi
+  done
+  [[ "$found" == true ]] || {
+    echo "$executable was not launched with use_sim_time=true" >&2
+    return 1
+  }
+  echo "Validated use_sim_time=true for $executable (pid $pid)"
+}
+
+assert_recorder_clock_endpoint() {
+  # A sim-time recorder does not create its requested topic subscriptions until
+  # it sees /clock. Ensure its clock endpoint is present before playback; the
+  # player's continuous clock then completes the handshake well before the
+  # estimator finishes initialization and begins publishing state estimates.
+  local clock_info
+  for _ in {1..50}; do
+    clock_info="$(ros2 topic info /clock --verbose 2>/dev/null || true)"
+    if grep -Fq "Node name: rosbag2_recorder" <<<"$clock_info"; then
+      echo "Validated recorder subscription to /clock"
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "Recorder did not advertise its /clock subscription" >&2
+  return 1
+}
+
 ros2 launch super_odometry livox_humanoid.launch.py \
   "config_file:=$config" \
   use_sim_time:=true &
@@ -98,18 +159,14 @@ for _ in {1..60}; do
 done
 [[ "$ready" == true ]] || { echo "Timed out waiting for SuperOdometry nodes" >&2; exit 1; }
 
-for node in "${required_nodes[@]}"; do
-  sim_time="$(ros2 param get "$node" use_sim_time 2>/dev/null || true)"
-  grep -Fq "True" <<<"$sim_time" || {
-    echo "$node did not enable simulated time: $sim_time" >&2
-    exit 1
-  }
+for executable in feature_extraction_node laser_mapping_node imu_preintegration_node; do
+  assert_process_sim_time "$executable"
 done
 
 ros2 bag record --use-sim-time -o "$output" /state_estimation &
 record_pid=$!
-sleep 2
 kill -0 "$record_pid" 2>/dev/null || { echo "Recorder exited before playback" >&2; exit 1; }
+assert_recorder_clock_endpoint
 
 ros2 bag play "$bag" --clock --rate "$rate"
 sleep 2
@@ -127,4 +184,3 @@ message_count="$(sed -n '/Topic: \/state_estimation/ s/.*Count: \([0-9][0-9]*\).
   exit 1
 }
 echo "Validated /state_estimation messages: $message_count"
-
