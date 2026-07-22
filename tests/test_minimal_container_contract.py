@@ -94,6 +94,12 @@ def test_runtime_wrapper_drops_privilege_and_gpu_requirements(tmp_path: Path) ->
             str(data),
             "--output-dir",
             str(output),
+            "--ros-domain-id",
+            "42",
+            "--container-name",
+            "superodom-contract-test",
+            "--network-interface",
+            "lo",
             "--",
             "ros2",
             "pkg",
@@ -110,9 +116,113 @@ def test_runtime_wrapper_drops_privilege_and_gpu_requirements(tmp_path: Path) ->
     assert "readonly" in command
     assert "--cap-drop ALL" in command
     assert "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" in command
+    assert "ROS_DOMAIN_ID=42" in command
+    assert "--name superodom-contract-test" in command
+    assert "CYCLONEDDS_URI=" in command
+    assert "NetworkInterface\\ name=\\\"lo\\\"" in command
     assert "--privileged" not in command
     assert "--gpus" not in command
     assert "--runtime=nvidia" not in command
+
+
+def test_runtime_wrapper_rejects_invalid_ros_domain_id(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    output = tmp_path / "output"
+    data.mkdir()
+    output.mkdir()
+
+    for invalid in ("-1", "233", "not-a-domain"):
+        completed = subprocess.run(
+            [
+                str(ROOT / "docker/humble-minimal/run.sh"),
+                "--dry-run",
+                "--data-dir",
+                str(data),
+                "--output-dir",
+                str(output),
+                "--ros-domain-id",
+                invalid,
+                "--",
+                "true",
+            ],
+            cwd=ROOT,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert completed.returncode == 2
+        assert "ROS domain ID must be an integer from 0 through 232" in completed.stderr
+
+
+def test_live_probe_and_shadow_are_bounded_and_non_actuating(tmp_path: Path) -> None:
+    expected = {
+        "live_input_probe.sh": ("/livox/lidar", "/livox/imu"),
+        "live_shadow.sh": ("/livox/lidar", "/livox/imu", "/state_estimation"),
+    }
+    forbidden = (
+        "/lowcmd",
+        "/lowstate",
+        "55555",
+        "55559",
+        "60000",
+        "6010",
+        "realsense",
+        "teleimager",
+        "gantry.yaml",
+        "use_sim_time:=true",
+    )
+
+    for script_name, topics in expected.items():
+        script_path = ROOT / "docker/humble-minimal" / script_name
+        content = script_path.read_text(encoding="utf-8").lower()
+        for topic in topics:
+            assert topic in content
+        for excluded in forbidden:
+            assert excluded not in content
+        assert "--ros-domain-id" in content
+        assert "timeout" in content
+        assert "ros2 bag record" in content
+        assert "refusing to overwrite" in content
+
+        output = tmp_path / script_name
+        completed = subprocess.run(
+            [
+                str(script_path),
+                "--dry-run",
+                "--output-dir",
+                str(output),
+                "--ros-domain-id",
+                "42",
+                "--duration-sec",
+                "10",
+                "--network-interface",
+                "lo",
+            ],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        assert "ROS_DOMAIN_ID=42" in completed.stdout
+        assert "NetworkInterface\\ name=\\\"lo\\\"" in completed.stdout
+        for topic in topics:
+            assert topic in completed.stdout
+
+    assert "use_sim_time:=false" in read("docker/humble-minimal/live_shadow.sh")
+    shadow = read("docker/humble-minimal/live_shadow.sh")
+    assert "record_lidar=false" in shadow
+    assert "record_topics=(" in shadow
+    for diagnostic_topic in (
+        "/livox/imu",
+        "/state_estimation",
+        "/laser_odometry",
+        "/super_odometry_stats",
+        "/state_estimation_health",
+        "/prediction_source",
+    ):
+        assert diagnostic_topic in shadow
+    assert 'if [[ "$record_lidar" == true ]]' in shadow
+    assert "live_superodometry_shadow_output_only" in shadow
 
 
 def test_shell_scripts_are_syntactically_valid() -> None:
@@ -121,6 +231,8 @@ def test_shell_scripts_are_syntactically_valid() -> None:
         ROOT / "docker/humble-minimal/run.sh",
         ROOT / "docker/humble-minimal/entrypoint.sh",
         ROOT / "docker/humble-minimal/replay_smoke.sh",
+        ROOT / "docker/humble-minimal/live_input_probe.sh",
+        ROOT / "docker/humble-minimal/live_shadow.sh",
         ROOT / "scripts/test_minimal_container.sh",
     ]
     for script in scripts:

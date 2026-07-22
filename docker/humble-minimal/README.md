@@ -4,11 +4,13 @@ This is the TML offboard SuperOdometry path for the Unitree G1 Mid-360. It
 builds a pinned, CPU-only ROS 2 Humble image on Oslo while leaving the robot's
 ROS 2 Foxy installation unchanged.
 
-Current status: **offline replay candidate validated on 2026-07-22**. The image
-builds, all required packages resolve, all shared libraries load, and the
-transferred known-good bag produces `/state_estimation` with close parity to
-the legacy offboard pipeline. The Foxy-to-Humble live DDS boundary and live
-latency have not yet been validated.
+Current status: **offline replay and stationary live shadow validated on
+2026-07-22**. The image builds, all required packages resolve, all shared
+libraries load, and the transferred known-good bag produces
+`/state_estimation` with close parity to the legacy offboard pipeline. A live
+Foxy Mid-360 on the gantry-supported G1 also drove coherent, stationary-stable
+output through an isolated Humble container on Oslo, subject to the one-raw-
+cloud-consumer constraint below.
 
 ## Operating boundary
 
@@ -173,44 +175,106 @@ Installed configurations are under:
 /opt/superodom_ws/install/share/super_odometry/config/livox/livox_mid360_calibration.yaml
 ```
 
-## Next gate: live, non-actuating shadow on Oslo
+## Live, non-actuating shadow on Oslo
 
-Create empty host directories for the wrapper, then first inspect the Foxy
-topics from the Humble container without launching SuperOdometry:
+Live DDS requires all three of these settings:
+
+- an isolated `ROS_DOMAIN_ID` shared by the G1 driver and Oslo container;
+- explicit CycloneDDS selection of Oslo's robot-facing NIC; and
+- exactly one reliable offboard subscriber to the raw `CustomMsg` cloud.
+
+Do not omit `--network-interface`. With host networking, CycloneDDS initially
+selected Oslo's campus NIC (`eno2`) and discovered no G1 publishers. Selecting
+`enxc8a362a1dc13` immediately discovered the Foxy topics. Resolve the current
+robot NIC with `ip route get 192.168.123.164` rather than copying that interface
+name across machines or boots.
+
+The current G1 `msg_MID360_launch.py` must also be replaced by a driver-only
+launch before production use. It starts a delayed Python
+`ros2 topic hz /livox/lidar -w 5` process. That second raw-cloud reader reduced
+receipt throughput below 10 Hz and caused sustained message-age growth. Killing
+only the monitor restored a stable 10.0002 Hz reliable stream with 85.7 ms p95
+newest-point age and no age growth. A permanent driver-only launch is still a
+required G1-side package change.
+
+First record a bounded input probe without launching SuperOdometry:
 
 ```bash
-mkdir -p /move/u/caydengu/superodom_live_input
-mkdir -p /move/u/caydengu/superodom_live_outputs
+cd /move/u/caydengu/cayden/SuperOdom_humanoid_mid360
 
-docker/humble-minimal/run.sh \
-  --data-dir /move/u/caydengu/superodom_live_input \
-  --output-dir /move/u/caydengu/superodom_live_outputs \
-  -- bash -c '
-    ros2 topic info /livox/imu --verbose
-    ros2 topic info /livox/lidar --verbose
-  '
+docker/humble-minimal/live_input_probe.sh \
+  --ros-domain-id 42 \
+  --network-interface enxc8a362a1dc13 \
+  --output-dir /move/u/caydengu/superodom_live_input \
+  --duration-sec 30
 ```
 
-Only after topic type, QoS, rate, timestamps, and cross-host clock health pass,
-launch the estimator without actuation:
+Only after type, QoS, rate, monotonicity, point offsets, and queue-age growth
+pass, run the bounded output-only shadow:
 
 ```bash
-docker/humble-minimal/run.sh \
-  --data-dir /move/u/caydengu/superodom_live_input \
-  --output-dir /move/u/caydengu/superodom_live_outputs \
-  -- ros2 launch super_odometry livox_humanoid.launch.py \
-     use_sim_time:=false
+docker/humble-minimal/live_shadow.sh \
+  --ros-domain-id 42 \
+  --network-interface enxc8a362a1dc13 \
+  --output-dir /move/u/caydengu/superodom_live_shadow \
+  --duration-sec 90
 ```
 
-The live gate must measure, rather than assume:
+The default deliberately records only IMU and compact estimator diagnostics.
+`--record-lidar` is a transport stress treatment, not the production topology:
+the estimator plus a second 400 kB raw-cloud recorder reproduced backlog at
+9.50 Hz, 1.80 s p95 newest-point age, and +14.55 ms/s age growth. Record the
+raw cloud upstream in a separate calibration/data-collection run, or introduce
+an explicitly designed single-reader transport, rather than casually adding
+raw subscribers.
 
-- Foxy-to-Humble discovery and QoS compatibility;
-- sensor header monotonicity and clock offset between the G1 and Oslo;
-- G1 capture to Oslo receipt latency;
-- capture to `/state_estimation` receipt latency, with p50, p95, and maximum;
-- output rate, drops, CPU load, and queue growth;
-- behavior during disconnect, timestamp jump, and stale input; and
-- static and moved-fixture trajectory quality against independent evidence.
+### Stationary live result
+
+The production-topology 90-second run produced:
+
+| Metric | Result |
+| --- | ---: |
+| `/state_estimation` rate | 200.00 Hz |
+| Output timestamps matching recorded IMU timestamps | 18,161 / 18,161 |
+| Output receipt age p95 | 0.892 ms |
+| First output after launch | 1.354 s |
+| Post-2-second maximum translation from warmup pose | 2.80 cm |
+| Post-2-second terminal translation from warmup pose | 2.02 cm |
+| Post-2-second maximum one-update translation | 2.39 mm |
+| Post-2-second maximum yaw from warmup pose | 1.31 degrees |
+
+An independent 45-second output-only diagnostic run reported all 8,830 health
+flags true and all 439 prediction-source samples as laser-inertial odometry.
+Whole-frame processing was 15.20 ms median, 18.02 ms p95, and 22.27 ms maximum,
+well below the 100 ms LiDAR period. Small diagnostic topics did not recreate
+raw-cloud backlog. Occasional roughly 200 ms interarrival gaps remain visible
+in the 10 Hz correction/statistics stream and should be revisited during
+dynamic validation.
+
+The complete bags, logs, metrics, and decision dashboard are in:
+
+```text
+/move/u/caydengu/cayden/research/perceptive-humanoid-diffusion/runs/
+  2026-07-22_superodometry-live-shadow/
+```
+
+### What this result does and does not establish
+
+This gate establishes live Foxy-to-Humble transport, timestamp correspondence,
+stationary relative stability, CPU processing headroom, and the viable
+single-reader topology. It does **not** establish absolute pose accuracy,
+dynamic motion quality, calibrated sensor extrinsics, or a pelvis/root pose.
+`/state_estimation` remains a sensor/IMU trajectory.
+
+The next gate must measure, rather than assume:
+
+- dynamic trajectory and orientation against an independent pose reference;
+- timestamped sensor-to-pelvis conversion using synchronized joint state and
+  forward kinematics;
+- current Mid-360 extrinsic calibration and time alignment;
+- controlled disconnect/stale-input behavior; and
+- whether the single-reader architecture should terminate in SuperOdometry or
+  a dedicated acquisition/recording relay.
 
 Do not connect `/state_estimation` to root FK, the elevation mapper, the 24 by
-16 policy adapter, or the policy until this live boundary passes.
+16 policy adapter, or the policy until the dynamic pose and root-FK gates pass.
