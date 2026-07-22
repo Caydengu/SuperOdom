@@ -17,6 +17,14 @@
 
 > 🔥 The system has been widely tested on above platforms equipped with Livox, Velodyne and Ouster LiDAR. 
 
+## TML minimal Humble container
+
+For the pinned, CPU-only Unitree G1 Mid-360 workflow used on Oslo, including
+safe host mounts, known-good replay, validation results, and the future
+Foxy-to-Humble live-shadow gate, see
+[`docker/humble-minimal/README.md`](docker/humble-minimal/README.md). This path
+does not require NVIDIA Docker, X11, or a privileged container.
+
 
 ## 📋 Table of Contents
 
