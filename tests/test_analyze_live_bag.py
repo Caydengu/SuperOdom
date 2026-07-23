@@ -124,6 +124,7 @@ def test_correction_timing_metrics_keep_pose_reference_and_evidence_separate() -
     assert result["timing_order_violation_count"] == 0
     assert result["sequence_nonmonotonic_count"] == 0
     assert math.isclose(result["scan_duration_ms"]["p50"], 99.25)
+    assert math.isclose(result["correction_evidence_gap_ms"]["p50"], 100.5)
     assert math.isclose(result["mapping_delay_from_newest_observation_ms"]["p50"], 26.25)
     assert math.isclose(result["estimator_application_delay_ms"]["p50"], 2.25)
     assert math.isclose(result["evidence_age_at_bridge_receipt_ms"]["p50"], 29.25)

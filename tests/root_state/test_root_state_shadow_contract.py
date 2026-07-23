@@ -31,6 +31,10 @@ def test_root_state_shadow_launches_bridge_and_records_only_compact_topics():
     assert "strictly_valid" in source
     assert "grep -q packet_published" not in source
     assert "ros2 topic hz" not in source
+    assert "setsid ros2 bag record" in source
+    assert "setsid ros2 launch super_odometry" in source
+    assert "setsid ros2 run g1_root_state_bridge" in source
+    assert 'kill -INT -- "-$pid"' in source
 
     record_block = source.split("record_topics=(", maxsplit=1)[1].split(")", maxsplit=1)[0]
     assert "/livox/lidar" not in record_block

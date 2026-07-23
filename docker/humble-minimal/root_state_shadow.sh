@@ -115,15 +115,15 @@ stop_process() {
   local pid=$1
   local label=$2
   [[ -n "$pid" ]] || return 0
-  kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
-  kill -INT "$pid" 2>/dev/null || true
+  kill -0 -- "-$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
+  kill -INT -- "-$pid" 2>/dev/null || true
   for _ in $(seq 1 75); do
-    kill -0 "$pid" 2>/dev/null || break
+    kill -0 -- "-$pid" 2>/dev/null || break
     sleep 0.2
   done
-  if kill -0 "$pid" 2>/dev/null; then
+  if kill -0 -- "-$pid" 2>/dev/null; then
     echo "$label did not stop after SIGINT; sending SIGTERM" >&2
-    kill -TERM "$pid" 2>/dev/null || true
+    kill -TERM -- "-$pid" 2>/dev/null || true
   fi
   wait "$pid" 2>/dev/null || true
 }
@@ -197,7 +197,7 @@ record_topics=(
   /pelvis_state_estimation
   /pelvis_state_bridge/status
 )
-ros2 bag record --include-unpublished-topics \
+setsid ros2 bag record --include-unpublished-topics \
   -o /output/data/root_state \
   "${record_topics[@]}" \
   > /output/logs/record.log 2>&1 &
@@ -206,12 +206,12 @@ sleep 1
 kill -0 "$recorder_pid" 2>/dev/null || { wait "$recorder_pid"; exit 37; }
 
 date +%s%N > /output/logs/launch_wall_ns.txt
-ros2 launch super_odometry livox_humanoid.launch.py \
+setsid ros2 launch super_odometry livox_humanoid.launch.py \
   use_sim_time:=false config_file:="$live_config" \
   > /output/logs/superodometry.log 2>&1 &
 launch_pid=$!
 
-ros2 run g1_root_state_bridge g1-root-state-bridge --ros-args \
+setsid ros2 run g1_root_state_bridge g1-root-state-bridge --ros-args \
   -p replay_jsonl_path:=/output/data/bridge_status.jsonl \
   -p root_state_bind_endpoint:=tcp://*:5575 \
   -p joint_bind_host:=0.0.0.0 \

@@ -311,6 +311,10 @@ def correction_timing_metrics(
             (evidence - reference) / 1e6
             for reference, evidence in zip(reference_ns, evidence_ns)
         ),
+        "correction_evidence_gap_ms": distribution(
+            (current - previous) / 1e6
+            for previous, current in zip(evidence_ns, evidence_ns[1:])
+        ),
         "mapping_delay_from_newest_observation_ms": distribution(
             (output - evidence) / 1e6
             for evidence, output in zip(evidence_ns, mapping_output_ns)

@@ -125,7 +125,8 @@ class HistoricalRootStateReplayer:
             source_epoch=source_epoch,
             allowed_calibration_digests={calibration_digest},
             max_joint_gap_ns=10_000_000,
-            max_correction_age_ns=150_000_000,
+            max_correction_input_age_ns=150_000_000,
+            max_correction_age_ns=250_000_000,
             max_health_age_ns=20_000_000,
         )
 

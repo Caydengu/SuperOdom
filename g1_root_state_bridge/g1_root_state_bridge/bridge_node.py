@@ -136,7 +136,8 @@ class G1RootStateBridgeNode(Node):
         self.declare_parameter("calibration_digest_sha256", "")
         self.declare_parameter("max_joint_transport_age_ms", 10.0)
         self.declare_parameter("max_joint_sync_gap_ms", 10.0)
-        self.declare_parameter("max_correction_age_ms", 150.0)
+        self.declare_parameter("max_correction_input_age_ms", 150.0)
+        self.declare_parameter("max_correction_age_ms", 250.0)
         self.declare_parameter("max_health_age_ms", 20.0)
         self.declare_parameter("pending_state_timeout_ms", 10.0)
         self.declare_parameter("replay_jsonl_path", "")
@@ -296,6 +297,12 @@ class G1RootStateBridgeNode(Node):
                 ),
                 max_joint_gap_ns=int(
                     float(self.get_parameter("max_joint_sync_gap_ms").value) * 1_000_000
+                ),
+                max_correction_input_age_ns=int(
+                    float(
+                        self.get_parameter("max_correction_input_age_ms").value
+                    )
+                    * 1_000_000
                 ),
                 max_correction_age_ns=int(
                     float(self.get_parameter("max_correction_age_ms").value) * 1_000_000

@@ -289,14 +289,24 @@ class BridgeCore:
         source_epoch: int,
         allowed_calibration_digests: set[bytes],
         max_joint_gap_ns: int,
+        max_correction_input_age_ns: int,
         max_correction_age_ns: int,
         max_health_age_ns: int,
         joint_buffer_capacity: int = 4096,
     ):
         if not isinstance(source_epoch, int) or not 0 <= source_epoch <= (1 << 64) - 1:
             raise BridgeCoreError("source epoch must be an unsigned 64-bit integer")
-        if min(max_joint_gap_ns, max_correction_age_ns, max_health_age_ns) < 0:
+        if min(
+            max_joint_gap_ns,
+            max_correction_input_age_ns,
+            max_correction_age_ns,
+            max_health_age_ns,
+        ) < 0:
             raise BridgeCoreError("bridge age and gap thresholds must be non-negative")
+        if max_correction_input_age_ns > max_correction_age_ns:
+            raise BridgeCoreError(
+                "correction input-age threshold cannot exceed hold-age threshold"
+            )
         if any(len(digest) != 32 for digest in allowed_calibration_digests):
             raise BridgeCoreError("allowlisted calibration digests must contain 32 bytes")
         self.calibration = calibration
@@ -305,6 +315,7 @@ class BridgeCore:
         self.source_epoch = source_epoch
         self.allowed_calibration_digests = frozenset(allowed_calibration_digests)
         self.max_joint_gap_ns = max_joint_gap_ns
+        self.max_correction_input_age_ns = max_correction_input_age_ns
         self.max_correction_age_ns = max_correction_age_ns
         self.max_health_age_ns = max_health_age_ns
         self._joint_buffer = JointBuffer(capacity=joint_buffer_capacity)
@@ -408,6 +419,9 @@ class BridgeCore:
             health_flags |= RootStateHealth.JOINT_SYNC_VALID
         correction_fresh = (
             correction is not None
+            and 0
+            <= correction.receipt_time_ns - correction.evidence_time_ns
+            <= self.max_correction_input_age_ns
             and 0
             <= publish_time_ns - correction.evidence_time_ns
             <= self.max_correction_age_ns

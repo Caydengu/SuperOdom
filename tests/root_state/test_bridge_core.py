@@ -122,6 +122,8 @@ def _ready_core(
     *,
     calibration: EstimatorCalibration | None = None,
     allowed_digests: set[bytes] | None = None,
+    max_correction_input_age_ns: int = 150_000_000,
+    max_correction_age_ns: int = 250_000_000,
 ) -> BridgeCore:
     selected = _calibration() if calibration is None else calibration
     core = BridgeCore(
@@ -132,7 +134,8 @@ def _ready_core(
             {selected.calibration_digest} if allowed_digests is None else allowed_digests
         ),
         max_joint_gap_ns=10_000_000,
-        max_correction_age_ns=150_000_000,
+        max_correction_input_age_ns=max_correction_input_age_ns,
+        max_correction_age_ns=max_correction_age_ns,
         max_health_age_ns=20_000_000,
     )
     core.append_joint(_joint(995_000_000, 10, -0.1))
@@ -214,7 +217,7 @@ def test_bridge_emits_strict_packet_with_real_joint_gap_and_correction_metadata(
     assert packet.calibration_digest == b"c" * 32
 
 
-def test_bridge_health_bits_fail_independently_without_reusing_good_state() -> None:
+def test_bridge_estimator_health_fails_independently_without_reusing_good_state() -> None:
     core = _ready_core()
     core.append_joint(_joint(1_095_000_000, 12, -0.1))
     core.append_joint(_joint(1_106_000_000, 13, 0.1))
@@ -226,12 +229,51 @@ def test_bridge_health_bits_fail_independently_without_reusing_good_state() -> N
     )
 
     assert not (packet.health_flags & RootStateHealth.ESTIMATOR_HEALTHY)
-    assert not (packet.health_flags & RootStateHealth.CORRECTION_FRESH)
+    assert packet.health_flags & RootStateHealth.CORRECTION_FRESH
     assert packet.health_flags & RootStateHealth.FINITE_POSE
     assert packet.health_flags & RootStateHealth.JOINT_SYNC_VALID
     assert packet.health_flags & RootStateHealth.CALIBRATION_VALID
     assert packet.health_flags & RootStateHealth.CLOCK_VALID
     assert not packet.strictly_valid
+
+
+def test_correction_quality_and_hold_horizons_are_independent() -> None:
+    core = _ready_core()
+
+    held_packet = core.build_packet(
+        _observation(),
+        publish_time_ns=1_120_000_000,
+    )
+    expired_packet = core.build_packet(
+        _observation(),
+        publish_time_ns=1_150_000_001,
+    )
+
+    assert held_packet.health_flags & RootStateHealth.CORRECTION_FRESH
+    assert not (expired_packet.health_flags & RootStateHealth.CORRECTION_FRESH)
+
+
+def test_late_arriving_correction_is_not_fresh_even_inside_hold_horizon() -> None:
+    core = _ready_core()
+    core._corrections.clear()
+    core.update_correction(
+        CorrectionSample(
+            reference_time_ns=800_000_000,
+            evidence_time_ns=900_000_000,
+            application_time_ns=1_050_000_000,
+            receipt_time_ns=1_051_000_001,
+            sequence=8,
+            reset_id=1,
+            covariance_diagonal=(0.1,) * 6,
+        )
+    )
+
+    packet = core.build_packet(
+        _observation(receipt_time_ns=1_060_000_000),
+        publish_time_ns=1_070_000_000,
+    )
+
+    assert not (packet.health_flags & RootStateHealth.CORRECTION_FRESH)
 
 
 def test_bridge_marks_unallowlisted_or_invalid_calibration_unhealthy() -> None:

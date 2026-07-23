@@ -36,7 +36,7 @@ def main() -> int:
     parser.add_argument("--output-json", required=True, type=Path)
     parser.add_argument("--allowed-calibration-sha256", action="append", default=[])
     parser.add_argument("--max-state-age-ms", type=float, default=10.0)
-    parser.add_argument("--max-correction-age-ms", type=float, default=150.0)
+    parser.add_argument("--max-correction-age-ms", type=float, default=250.0)
     parser.add_argument("--trace-end-time-ns", type=int)
     args = parser.parse_args()
 
