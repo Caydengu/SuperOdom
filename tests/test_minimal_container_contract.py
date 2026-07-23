@@ -53,6 +53,8 @@ def test_dependency_lock_contains_full_revisions() -> None:
         "LIVOX_SDK2_REVISION": "6a940156dd7151c3ab6a52442d86bc83613bd11b",
         "GTSAM_REVISION": "4abef9248edc4c49943d8fd8a84c028deb486f4c",
         "SOPHUS_REVISION": "97e71617749a32b83cdd411591ebb2ede9d330f0",
+        "PINOCCHIO_DEB_VERSION": "4.0.0-2jammy.20260606.100000",
+        "PYBULLET_VERSION": "3.2.7",
     }
     for key, value in expected.items():
         assert f"{key}={value}" in lock
@@ -67,6 +69,12 @@ def test_dockerfile_is_cpu_only_and_pinned() -> None:
     assert "--packages-select" in dockerfile
     assert "replay_smoke.sh" in dockerfile
     assert "superodom-replay-smoke" in dockerfile
+    assert "ros-humble-pinocchio=${PINOCCHIO_DEB_VERSION}" in dockerfile
+    assert "pybullet==${PYBULLET_VERSION}" in dockerfile
+    assert "COPY g1_root_state_bridge" in dockerfile
+    build_script = read("docker/humble-minimal/build_image.sh")
+    assert 'PINOCCHIO_DEB_VERSION=$PINOCCHIO_DEB_VERSION' in build_script
+    assert 'PYBULLET_VERSION=$PYBULLET_VERSION' in build_script
     for forbidden in ("desktop-full", "nvidia", "rviz", "plotjuggler", "x11"):
         assert forbidden not in lowered
 

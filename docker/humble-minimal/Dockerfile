@@ -6,6 +6,8 @@ ARG LIVOX_DRIVER_REVISION
 ARG LIVOX_SDK2_REVISION
 ARG GTSAM_REVISION
 ARG SOPHUS_REVISION
+ARG PINOCCHIO_DEB_VERSION
+ARG PYBULLET_VERSION
 
 LABEL org.opencontainers.image.title="TML SuperOdometry ROS 2 Humble"
 LABEL org.opencontainers.image.description="Pinned CPU-only Mid-360 SuperOdometry runtime"
@@ -14,6 +16,8 @@ LABEL tml.superodom.livox_driver_revision="${LIVOX_DRIVER_REVISION}"
 LABEL tml.superodom.livox_sdk2_revision="${LIVOX_SDK2_REVISION}"
 LABEL tml.superodom.gtsam_revision="${GTSAM_REVISION}"
 LABEL tml.superodom.sophus_revision="${SOPHUS_REVISION}"
+LABEL tml.superodom.pinocchio_deb_version="${PINOCCHIO_DEB_VERSION}"
+LABEL tml.superodom.pybullet_version="${PYBULLET_VERSION}"
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
@@ -32,10 +36,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libsuitesparse-dev \
       libtbb-dev \
       python3-colcon-common-extensions \
+      python3-pip \
       ros-humble-ament-cmake-auto \
       ros-humble-cv-bridge \
       ros-humble-image-transport \
       ros-humble-pcl-conversions \
+      ros-humble-pinocchio=${PINOCCHIO_DEB_VERSION} \
       ros-humble-rmw-cyclonedds-cpp \
       ros-humble-rmw-fastrtps-cpp \
       ros-humble-rosbag2 \
@@ -45,6 +51,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-humble-tf2-ros \
       ros-humble-visualization-msgs \
     && rm -rf /var/lib/apt/lists/*
+
+RUN test -n "${PYBULLET_VERSION}" \
+    && python3 -m pip install --no-cache-dir --no-deps \
+         "pybullet==${PYBULLET_VERSION}"
 
 WORKDIR /opt/source
 
@@ -92,6 +102,7 @@ RUN test -n "${LIVOX_DRIVER_REVISION}" \
 
 COPY super_odometry /opt/superodom_ws/src/super_odometry
 COPY super_odometry_msgs /opt/superodom_ws/src/super_odometry_msgs
+COPY g1_root_state_bridge /opt/g1_root_state_bridge
 
 WORKDIR /opt/superodom_ws
 RUN source /opt/ros/humble/setup.bash \
@@ -114,6 +125,7 @@ COPY docker/humble-minimal/replay_smoke.sh /usr/local/bin/superodom-replay-smoke
 RUN chmod 0755 /usr/local/bin/superodom-entrypoint /usr/local/bin/superodom-replay-smoke
 
 ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ENV PYTHONPATH=/opt/g1_root_state_bridge
 WORKDIR /output
 ENTRYPOINT ["/usr/local/bin/superodom-entrypoint"]
 CMD ["bash"]

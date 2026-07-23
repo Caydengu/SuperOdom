@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<!--
+  Kinematics-only extraction of the pelvis -> waist -> physical Mid-360 chain.
+  source_full_urdf_sha256=c34d7ebbd1e6345bb815a54e05523086a68f4105d2ed414be6ca50f52f08473f
+  source_path=holosoma_inference/localization/assets/g1_29dof_rev_1_0_corrected.urdf
+
+  The Mid-360 frame here is the physical, upside-down sensor frame.  A
+  estimator-defined observed frame is represented separately by an explicit,
+  hash-bound physical_sensor_T_observed calibration transform.  The current
+  SuperOdometry output uses the physical LiDAR frame after world normalization.
+-->
+<robot name="g1_pelvis_mid360_kinematics">
+  <link name="pelvis"/>
+
+  <link name="waist_yaw_link"/>
+  <joint name="waist_yaw_joint" type="revolute">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="pelvis"/>
+    <child link="waist_yaw_link"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.618" upper="2.618" effort="88" velocity="32"/>
+  </joint>
+
+  <link name="waist_roll_link"/>
+  <joint name="waist_roll_joint" type="revolute">
+    <origin xyz="-0.0039635 0 0.044" rpy="0 0 0"/>
+    <parent link="waist_yaw_link"/>
+    <child link="waist_roll_link"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.52" upper="0.52" effort="50" velocity="37"/>
+  </joint>
+
+  <link name="torso_link"/>
+  <joint name="waist_pitch_joint" type="revolute">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="waist_roll_link"/>
+    <child link="torso_link"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.52" upper="0.52" effort="50" velocity="37"/>
+  </joint>
+
+  <link name="mid360_link"/>
+  <joint name="mid360_joint" type="fixed">
+    <origin xyz="0.0002835 0.00003 0.41618" rpy="3.14159265 0.04014257279586953 0"/>
+    <parent link="torso_link"/>
+    <child link="mid360_link"/>
+  </joint>
+</robot>

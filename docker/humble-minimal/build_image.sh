@@ -23,5 +23,6 @@ exec docker build \
   --build-arg "LIVOX_SDK2_REVISION=$LIVOX_SDK2_REVISION" \
   --build-arg "GTSAM_REVISION=$GTSAM_REVISION" \
   --build-arg "SOPHUS_REVISION=$SOPHUS_REVISION" \
+  --build-arg "PINOCCHIO_DEB_VERSION=$PINOCCHIO_DEB_VERSION" \
+  --build-arg "PYBULLET_VERSION=$PYBULLET_VERSION" \
   "$repo_root"
-
