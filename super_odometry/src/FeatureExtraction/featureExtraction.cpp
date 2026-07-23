@@ -90,8 +90,11 @@ namespace super_odometry {
         pubLaserCloud = this->create_publisher<sensor_msgs::msg::PointCloud2>(
             ProjectName+"/velodyne_cloud_2", 2);
 
-        pubLaserFeatureInfo = this->create_publisher<super_odometry_msgs::msg::LaserFeature>(
-            ProjectName+"/feature_info", 2);
+        const auto feature_qos =
+            rclcpp::QoS(rclcpp::KeepLast(16)).reliable();
+        pubLaserFeatureInfo =
+            this->create_publisher<super_odometry_msgs::msg::LaserFeature>(
+                ProjectName+"/feature_info", feature_qos);
 
         pubLidarPipelineEvent =
             this->create_publisher<super_odometry_msgs::msg::LidarPipelineEvent>(

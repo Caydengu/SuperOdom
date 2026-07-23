@@ -156,6 +156,25 @@ def test_mapping_drains_feature_queue_without_clearing_newer_frames() -> None:
     assert "realsenseBuf.pop();" in mapping_source
 
 
+def test_feature_to_mapping_transport_buffers_transient_callback_jitter() -> None:
+    feature_source = _read(
+        "super_odometry/src/FeatureExtraction/featureExtraction.cpp"
+    )
+    mapping_source = _read("super_odometry/src/LaserMapping/laserMapping.cpp")
+    qos_contract = "rclcpp::QoS(rclcpp::KeepLast(16)).reliable()"
+
+    assert qos_contract in feature_source
+    assert qos_contract in mapping_source
+    assert (
+        'create_publisher<super_odometry_msgs::msg::LaserFeature>('
+        in feature_source
+    )
+    assert (
+        'create_subscription<super_odometry_msgs::msg::LaserFeature>('
+        in mapping_source
+    )
+
+
 def test_bridge_is_an_ament_python_package_with_typed_ros_inputs() -> None:
     package = _read("g1_root_state_bridge/package.xml")
     setup = _read("g1_root_state_bridge/setup.py")

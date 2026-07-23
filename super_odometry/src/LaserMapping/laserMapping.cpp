@@ -51,8 +51,10 @@ namespace super_odometry {
         downSizeFilterSurf.setLeafSize(config_.planeRes, config_.planeRes, config_.planeRes);
 
 
+        const auto feature_qos =
+            rclcpp::QoS(rclcpp::KeepLast(16)).reliable();
         subLaserFeatureInfo = this->create_subscription<super_odometry_msgs::msg::LaserFeature>(
-            ProjectName+"/feature_info", 2,
+            ProjectName+"/feature_info", feature_qos,
             std::bind(&laserMapping::laserFeatureInfoHandler, this,
                         std::placeholders::_1), sub_options);
                         
