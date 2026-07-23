@@ -52,6 +52,12 @@ namespace super_odometry {
             ProjectName+"/state_estimation", 10);
         pubHealthStatus = this->create_publisher<std_msgs::msg::Bool>(
             ProjectName+"/state_estimation_health", 1);
+        auto calibration_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+        calibration_qos.reliable();
+        calibration_qos.transient_local();
+        pubStateEstimationCalibration =
+            this->create_publisher<super_odometry_msgs::msg::StateEstimationCalibration>(
+                ProjectName+"/state_estimation_calibration", calibration_qos);
         pubImuPath = this->create_publisher<nav_msgs::msg::Path>(
             ProjectName+"/imuodom_path", 1);
 
@@ -225,6 +231,27 @@ namespace super_odometry {
         gtsam::Pose3 imuPoseInWorld = lidarPose.compose(T_l_i);
         Eigen::Matrix3d R_w_i = imuPoseInWorld.rotation().matrix();
         Eigen::Vector3d g_world_dir = (R_w_i * g_b_dir).normalized();
+
+        // Construct map_R_gravity directly from the measured gravity vector.
+        // Gravity +Z points upward while +X is the map +X direction projected
+        // onto the horizontal plane. This removes roll/pitch without inventing
+        // a yaw offset and remains correct for the upside-down Mid-360 mount.
+        const Eigen::Vector3d gravity_up_map = -g_world_dir;
+        Eigen::Vector3d gravity_x_map = Eigen::Vector3d::UnitX()
+            - gravity_up_map * gravity_up_map.dot(Eigen::Vector3d::UnitX());
+        if (gravity_x_map.norm() < 1e-6) {
+            gravity_x_map = Eigen::Vector3d::UnitY()
+                - gravity_up_map * gravity_up_map.dot(Eigen::Vector3d::UnitY());
+        }
+        gravity_x_map.normalize();
+        Eigen::Vector3d gravity_y_map = gravity_up_map.cross(gravity_x_map).normalized();
+        Eigen::Matrix3d map_R_gravity;
+        map_R_gravity.col(0) = gravity_x_map;
+        map_R_gravity.col(1) = gravity_y_map;
+        map_R_gravity.col(2) = gravity_up_map;
+        R_wm_ = map_R_gravity.transpose();
+        world_align_ready_ = map_R_gravity.allFinite()
+            && std::abs(map_R_gravity.determinant() - 1.0) < 1e-6;
         
         // Create preintegration parameters with gravity in world frame
         // Choose MakeSharedD or MakeSharedU based on gravity Z component in world frame
@@ -367,6 +394,48 @@ namespace super_odometry {
 
         key = 1;
         systemInitialized = true;
+        ++state_estimation_epoch_;
+        publishStateEstimationCalibration(currentCorrectionTime);
+    }
+
+    void imuPreintegration::publishStateEstimationCalibration(double initialization_time) {
+        if (!pubStateEstimationCalibration) {
+            return;
+        }
+        super_odometry_msgs::msg::StateEstimationCalibration calibration;
+        const auto initialization_ns = static_cast<std::int64_t>(
+            std::llround(initialization_time * 1e9));
+        calibration.header.stamp = static_cast<builtin_interfaces::msg::Time>(
+            rclcpp::Time(initialization_ns, RCL_ROS_TIME));
+        calibration.header.frame_id = WORLD_FRAME;
+        calibration.semantics_version = "superodom-state-estimation-raw-v1";
+        calibration.map_frame = WORLD_FRAME;
+        calibration.sensor_frame = SENSOR_FRAME;
+        calibration.gravity_frame = "gravity_aligned";
+
+        const Eigen::Matrix3d map_R_gravity = R_wm_.transpose();
+        Eigen::Quaterniond map_q_gravity(map_R_gravity);
+        map_q_gravity.normalize();
+        calibration.map_t_gravity.rotation.w = map_q_gravity.w();
+        calibration.map_t_gravity.rotation.x = map_q_gravity.x();
+        calibration.map_t_gravity.rotation.y = map_q_gravity.y();
+        calibration.map_t_gravity.rotation.z = map_q_gravity.z();
+        calibration.map_t_gravity.translation.x = 0.0;
+        calibration.map_t_gravity.translation.y = 0.0;
+        calibration.map_t_gravity.translation.z = 0.0;
+
+        Eigen::Quaterniond imu_q_lidar(T_i_l.rotation().matrix());
+        imu_q_lidar.normalize();
+        calibration.imu_t_lidar.rotation.w = imu_q_lidar.w();
+        calibration.imu_t_lidar.rotation.x = imu_q_lidar.x();
+        calibration.imu_t_lidar.rotation.y = imu_q_lidar.y();
+        calibration.imu_t_lidar.rotation.z = imu_q_lidar.z();
+        calibration.imu_t_lidar.translation.x = T_i_l.translation().x();
+        calibration.imu_t_lidar.translation.y = T_i_l.translation().y();
+        calibration.imu_t_lidar.translation.z = T_i_l.translation().z();
+        calibration.reset_id = state_estimation_epoch_;
+        calibration.valid = world_align_ready_;
+        pubStateEstimationCalibration->publish(calibration);
     }
 
     void imuPreintegration::integrate_imumeasurement(double currentCorrectionTime) {

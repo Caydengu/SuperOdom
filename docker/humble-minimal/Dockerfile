@@ -8,6 +8,7 @@ ARG GTSAM_REVISION
 ARG SOPHUS_REVISION
 ARG PINOCCHIO_DEB_VERSION
 ARG PYBULLET_VERSION
+ARG PYZMQ_VERSION
 
 LABEL org.opencontainers.image.title="TML SuperOdometry ROS 2 Humble"
 LABEL org.opencontainers.image.description="Pinned CPU-only Mid-360 SuperOdometry runtime"
@@ -18,6 +19,7 @@ LABEL tml.superodom.gtsam_revision="${GTSAM_REVISION}"
 LABEL tml.superodom.sophus_revision="${SOPHUS_REVISION}"
 LABEL tml.superodom.pinocchio_deb_version="${PINOCCHIO_DEB_VERSION}"
 LABEL tml.superodom.pybullet_version="${PYBULLET_VERSION}"
+LABEL tml.superodom.pyzmq_version="${PYZMQ_VERSION}"
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
@@ -53,8 +55,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN test -n "${PYBULLET_VERSION}" \
+    && test -n "${PYZMQ_VERSION}" \
     && python3 -m pip install --no-cache-dir --no-deps \
-         "pybullet==${PYBULLET_VERSION}"
+         "pybullet==${PYBULLET_VERSION}" \
+         "pyzmq==${PYZMQ_VERSION}"
 
 WORKDIR /opt/source
 
@@ -102,14 +106,14 @@ RUN test -n "${LIVOX_DRIVER_REVISION}" \
 
 COPY super_odometry /opt/superodom_ws/src/super_odometry
 COPY super_odometry_msgs /opt/superodom_ws/src/super_odometry_msgs
-COPY g1_root_state_bridge /opt/g1_root_state_bridge
+COPY g1_root_state_bridge /opt/superodom_ws/src/g1_root_state_bridge
 
 WORKDIR /opt/superodom_ws
 RUN source /opt/ros/humble/setup.bash \
     && colcon build \
          --merge-install \
          --event-handlers console_direct+ \
-         --packages-select livox_ros_driver2 super_odometry_msgs super_odometry \
+         --packages-select livox_ros_driver2 super_odometry_msgs super_odometry g1_root_state_bridge \
          --cmake-args \
            -DCMAKE_BUILD_TYPE=Release \
            -DROS_EDITION=ROS2 \
@@ -118,6 +122,7 @@ RUN source /opt/ros/humble/setup.bash \
     && ros2 pkg prefix livox_ros_driver2 \
     && ros2 pkg prefix super_odometry_msgs \
     && ros2 pkg prefix super_odometry \
+    && ros2 pkg prefix g1_root_state_bridge \
     && rm -rf build log src/livox_ros_driver2/.git
 
 COPY docker/humble-minimal/entrypoint.sh /usr/local/bin/superodom-entrypoint
@@ -125,7 +130,6 @@ COPY docker/humble-minimal/replay_smoke.sh /usr/local/bin/superodom-replay-smoke
 RUN chmod 0755 /usr/local/bin/superodom-entrypoint /usr/local/bin/superodom-replay-smoke
 
 ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-ENV PYTHONPATH=/opt/g1_root_state_bridge
 WORKDIR /output
 ENTRYPOINT ["/usr/local/bin/superodom-entrypoint"]
 CMD ["bash"]

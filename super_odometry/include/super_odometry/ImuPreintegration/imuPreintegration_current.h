@@ -12,6 +12,7 @@
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/transform_broadcaster.h>
+#include <super_odometry_msgs/msg/state_estimation_calibration.hpp>
 
 
 #include "utility.h"
@@ -116,6 +117,8 @@ namespace super_odometry {
 
         void publishTransformsAndPath(nav_msgs::msg::Odometry &odometry, const sensor_msgs::msg::Imu& thisImu);
 
+        void publishStateEstimationCalibration(double initialization_time);
+
         void processTiming(const sensor_msgs::msg::Imu& thisImu);
 
         void initializeImu(const sensor_msgs::msg::Imu::SharedPtr& imu_raw);
@@ -141,6 +144,8 @@ namespace super_odometry {
         rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuOdometry;
         rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pubHealthStatus;
         rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubImuPath;
+        rclcpp::Publisher<super_odometry_msgs::msg::StateEstimationCalibration>::SharedPtr
+            pubStateEstimationCalibration;
 
 
         rclcpp::CallbackGroup::SharedPtr cb_group_;
@@ -177,6 +182,7 @@ namespace super_odometry {
         // Fixed alignment from LiDAR map frame 'm' to gravity-aligned world 'w'
         Eigen::Matrix3d R_wm_ = Eigen::Matrix3d::Identity();
         bool world_align_ready_ = false;
+        std::uint64_t state_estimation_epoch_ = 0;
 
     public:
         MapRingBuffer<Imu::Ptr> imuBuf;

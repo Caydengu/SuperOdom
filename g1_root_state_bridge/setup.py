@@ -1,0 +1,26 @@
+from setuptools import find_packages, setup
+
+
+package_name = "g1_root_state_bridge"
+
+setup(
+    name=package_name,
+    version="0.1.0",
+    packages=find_packages(exclude=("test", "tests")),
+    data_files=[
+        ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
+        (f"share/{package_name}", ["package.xml"]),
+    ],
+    package_data={package_name: ["assets/*.urdf"]},
+    install_requires=["setuptools"],
+    zip_safe=False,
+    maintainer="Cayden Gu",
+    maintainer_email="caydengu@stanford.edu",
+    description="Typed SuperOdometry-to-Unitree-G1 pelvis state bridge.",
+    license="BSD-3-Clause",
+    entry_points={
+        "console_scripts": [
+            "g1-root-state-bridge = g1_root_state_bridge.bridge_node:main",
+        ],
+    },
+)

@@ -25,4 +25,5 @@ exec docker build \
   --build-arg "SOPHUS_REVISION=$SOPHUS_REVISION" \
   --build-arg "PINOCCHIO_DEB_VERSION=$PINOCCHIO_DEB_VERSION" \
   --build-arg "PYBULLET_VERSION=$PYBULLET_VERSION" \
+  --build-arg "PYZMQ_VERSION=$PYZMQ_VERSION" \
   "$repo_root"
