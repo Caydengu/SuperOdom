@@ -44,6 +44,26 @@ def test_recorder_preserves_raw_capture_and_quality_fields() -> None:
         assert forbidden_transform not in source
 
 
+def test_recorder_binds_identity_to_motive_description_fail_closed() -> None:
+    source = RECORDER_SOURCE.read_text(encoding="utf-8")
+
+    for required_text in (
+        "GetDataDescriptionList",
+        "NatNet_FreeDescriptions",
+        "Descriptor_RigidBody",
+        "rigid_body_identity_validated",
+        "server_rigid_body_name",
+        "server_rigid_body_marker_count",
+        "available direct rigid bodies",
+        "does not match Motive description",
+    ):
+        assert required_text in source
+
+    assert "description->ID == options.rigid_body_id" in source
+    assert "server_name != options.rigid_body_name" in source
+    assert "context.tracking_valid_count.load() > 0" in source
+
+
 def test_build_script_is_syntax_valid_and_requires_pinned_sdk_root() -> None:
     script = BUILD_SCRIPT.read_text(encoding="utf-8")
 
@@ -52,4 +72,3 @@ def test_build_script_is_syntax_valid_and_requires_pinned_sdk_root() -> None:
     assert "NatNet_SDK_4.4" in script
     assert "libNatNet.so" in script
     assert "optitrack_reference_recorder.cpp" in script
-

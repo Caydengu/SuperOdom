@@ -51,6 +51,29 @@ def _raw_records() -> list[dict[str, object]]:
             "coordinate_frame": "motive_world_native",
             "rigid_body_id": 10,
             "rigid_body_name": "g1_pelvis",
+            "rigid_body_identity_validated": True,
+            "server_rigid_body_name": "g1_pelvis",
+            "server_rigid_body_marker_count": 3,
+            "server_rigid_body_markers": [
+                {
+                    "index": 0,
+                    "name": "pelvis_a",
+                    "position_xyz_m": [0.0, 0.0, 0.0],
+                    "required_active_label": 0,
+                },
+                {
+                    "index": 1,
+                    "name": "pelvis_b",
+                    "position_xyz_m": [0.1, 0.0, 0.0],
+                    "required_active_label": 0,
+                },
+                {
+                    "index": 2,
+                    "name": "pelvis_c",
+                    "position_xyz_m": [0.0, 0.1, 0.0],
+                    "required_active_label": 0,
+                },
+            ],
             "calibration_id": "motive-rigid-body-definition-v7",
             "natnet_sdk_archive_sha256": "a" * 64,
         }
@@ -173,6 +196,30 @@ def test_raw_capture_identity_must_match_calibration() -> None:
     calibration = load_pelvis_calibration(_calibration_payload())
 
     with pytest.raises(OptiTrackReferenceError, match="identity"):
+        convert_raw_optitrack_records(
+            records,
+            calibration=calibration,
+            calibration_sha256="b" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("rigid_body_identity_validated", False),
+        ("server_rigid_body_name", "not_the_pelvis"),
+        ("server_rigid_body_marker_count", 2),
+    ],
+)
+def test_raw_capture_requires_server_validated_body_definition(
+    field: str,
+    value: object,
+) -> None:
+    records = _raw_records()
+    records[0][field] = value
+    calibration = load_pelvis_calibration(_calibration_payload())
+
+    with pytest.raises(OptiTrackReferenceError, match="Motive"):
         convert_raw_optitrack_records(
             records,
             calibration=calibration,

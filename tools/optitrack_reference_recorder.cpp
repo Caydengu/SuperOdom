@@ -9,6 +9,7 @@
 #include <NatNetTypes.h>
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -21,10 +22,12 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <csignal>
 #include <ctime>
@@ -196,6 +199,31 @@ struct Options {
   double duration_seconds{10.0};
 };
 
+struct RigidBodyMarkerDescription {
+  std::array<float, 3> position_m{};
+  int required_active_label{0};
+  std::string name;
+};
+
+struct RigidBodyDescriptionSnapshot {
+  int id{-1};
+  std::string name;
+  int parent_id{-1};
+  std::array<float, 3> parent_offset_m{};
+  std::vector<RigidBodyMarkerDescription> markers;
+};
+
+struct DataDescriptionsDeleter {
+  void operator()(sDataDescriptions* descriptions) const {
+    if (descriptions != nullptr) {
+      NatNet_FreeDescriptions(descriptions);
+    }
+  }
+};
+
+using DataDescriptionsPtr =
+    std::unique_ptr<sDataDescriptions, DataDescriptionsDeleter>;
+
 void PrintUsage(std::ostream& stream, const char* executable) {
   stream
       << "Usage: " << executable
@@ -257,6 +285,97 @@ Options ParseArguments(int argc, char** argv) {
     throw std::runtime_error("connection must be multicast or unicast");
   }
   return options;
+}
+
+RigidBodyDescriptionSnapshot BindRigidBodyDescription(
+    NatNetClient& client, const Options& options) {
+  sDataDescriptions* raw_descriptions = nullptr;
+  const ErrorCode result =
+      client.GetDataDescriptionList(&raw_descriptions);
+  DataDescriptionsPtr descriptions(raw_descriptions);
+  if (result != ErrorCode_OK || descriptions == nullptr) {
+    throw std::runtime_error(
+        "failed to retrieve Motive data descriptions");
+  }
+
+  std::optional<RigidBodyDescriptionSnapshot> selected;
+  std::optional<std::string> mismatched_name;
+  std::ostringstream available;
+  bool first = true;
+  for (int index = 0;
+       index < descriptions->nDataDescriptions; ++index) {
+    const sDataDescription& entry =
+        descriptions->arrDataDescriptions[index];
+    if (entry.type != Descriptor_RigidBody ||
+        entry.Data.RigidBodyDescription == nullptr) {
+      continue;
+    }
+    const sRigidBodyDescription* description =
+        entry.Data.RigidBodyDescription;
+    const std::string server_name(description->szName);
+    if (!first) {
+      available << ", ";
+    }
+    first = false;
+    available << description->ID << ":" << server_name;
+
+    if (description->ID == options.rigid_body_id) {
+      if (server_name != options.rigid_body_name) {
+        mismatched_name = server_name;
+        continue;
+      }
+      RigidBodyDescriptionSnapshot snapshot;
+      snapshot.id = description->ID;
+      snapshot.name = server_name;
+      snapshot.parent_id = description->parentID;
+      snapshot.parent_offset_m = {
+          description->offsetx,
+          description->offsety,
+          description->offsetz};
+      for (int marker_index = 0;
+           marker_index < description->nMarkers; ++marker_index) {
+        RigidBodyMarkerDescription marker;
+        if (description->MarkerPositions != nullptr) {
+          marker.position_m = {
+              description->MarkerPositions[marker_index][0],
+              description->MarkerPositions[marker_index][1],
+              description->MarkerPositions[marker_index][2]};
+        }
+        if (description->MarkerRequiredLabels != nullptr) {
+          marker.required_active_label =
+              description->MarkerRequiredLabels[marker_index];
+        }
+        if (description->szMarkerNames != nullptr &&
+            description->szMarkerNames[marker_index] != nullptr) {
+          marker.name = description->szMarkerNames[marker_index];
+        }
+        snapshot.markers.push_back(std::move(marker));
+      }
+      selected = std::move(snapshot);
+    }
+  }
+
+  if (mismatched_name.has_value()) {
+    std::ostringstream message;
+    message << "requested rigid body name "
+            << options.rigid_body_name
+            << " does not match Motive description "
+            << *mismatched_name << " for ID "
+            << options.rigid_body_id
+            << "; available direct rigid bodies: "
+            << available.str();
+    throw std::runtime_error(message.str());
+  }
+  if (!selected.has_value()) {
+    std::ostringstream message;
+    message << "requested rigid body ID "
+            << options.rigid_body_id
+            << " is absent from Motive descriptions; "
+            << "available direct rigid bodies: "
+            << available.str();
+    throw std::runtime_error(message.str());
+  }
+  return *selected;
 }
 
 struct RecorderContext {
@@ -402,6 +521,7 @@ void NATNET_CALLCONV FrameHandler(
 std::string MetadataLine(
     const Options& options,
     const sServerDescription& server,
+    const RigidBodyDescriptionSnapshot& rigid_body,
     const unsigned char sdk_version[4]) {
   std::ostringstream line;
   line << "{\"schema\":\"" << kSchema << "\",\"kind\":\"metadata\""
@@ -437,6 +557,36 @@ std::string MetadataLine(
        << ",\"rigid_body_id\":" << options.rigid_body_id
        << ",\"rigid_body_name\":\""
        << JsonEscape(options.rigid_body_name) << "\""
+       << ",\"rigid_body_identity_validated\":true"
+       << ",\"server_rigid_body_name\":\""
+       << JsonEscape(rigid_body.name) << "\""
+       << ",\"server_rigid_body_parent_id\":"
+       << rigid_body.parent_id
+       << ",\"server_rigid_body_parent_offset_xyz_m\":["
+       << std::setprecision(9)
+       << rigid_body.parent_offset_m[0] << ','
+       << rigid_body.parent_offset_m[1] << ','
+       << rigid_body.parent_offset_m[2] << ']'
+       << ",\"server_rigid_body_marker_count\":"
+       << rigid_body.markers.size()
+       << ",\"server_rigid_body_markers\":[";
+  for (std::size_t index = 0;
+       index < rigid_body.markers.size(); ++index) {
+    if (index != 0) {
+      line << ',';
+    }
+    const RigidBodyMarkerDescription& marker =
+        rigid_body.markers[index];
+    line << "{\"index\":" << index
+         << ",\"name\":\"" << JsonEscape(marker.name) << "\""
+         << ",\"position_xyz_m\":["
+         << marker.position_m[0] << ','
+         << marker.position_m[1] << ','
+         << marker.position_m[2] << ']'
+         << ",\"required_active_label\":"
+         << marker.required_active_label << '}';
+  }
+  line << ']'
        << ",\"calibration_id\":\""
        << JsonEscape(options.calibration_id) << "\""
        << ",\"capture_start_realtime_ns\":"
@@ -511,12 +661,20 @@ int main(int argc, char** argv) {
     }
     context.high_resolution_clock_frequency_hz =
         server.HighResClockFrequency;
+    RigidBodyDescriptionSnapshot rigid_body;
+    try {
+      rigid_body = BindRigidBodyDescription(client, options);
+    } catch (...) {
+      client.Disconnect();
+      throw;
+    }
 
     unsigned char sdk_version[4]{};
     NatNet_GetVersion(sdk_version);
     AsyncJsonlWriter writer(options.output_path);
     context.writer = &writer;
-    writer.WriteMetadata(MetadataLine(options, server, sdk_version));
+    writer.WriteMetadata(
+        MetadataLine(options, server, rigid_body, sdk_version));
     writer.Start();
     context.enabled.store(true);
 
@@ -537,6 +695,7 @@ int main(int argc, char** argv) {
     const bool complete =
         context.frame_count.load() > 0 &&
         context.body_present_count.load() > 0 &&
+        context.tracking_valid_count.load() > 0 &&
         context.callback_error_count.load() == 0 &&
         writer.dropped_records() == 0;
     std::cout << "frames=" << context.frame_count.load()

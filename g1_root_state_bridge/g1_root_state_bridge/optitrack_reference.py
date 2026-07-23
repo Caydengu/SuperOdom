@@ -309,6 +309,18 @@ def _metadata_record(
             "natnet_sdk_archive_sha256"
         ),
         "raw_capture_calibration_id": calibration.raw_capture_calibration_id,
+        "raw_rigid_body_identity_validated": raw_metadata.get(
+            "rigid_body_identity_validated"
+        ),
+        "raw_server_rigid_body_name": raw_metadata.get(
+            "server_rigid_body_name"
+        ),
+        "raw_server_rigid_body_marker_count": raw_metadata.get(
+            "server_rigid_body_marker_count"
+        ),
+        "raw_server_rigid_body_markers": raw_metadata.get(
+            "server_rigid_body_markers"
+        ),
         "clock_mapping_method": calibration.clock_mapping_method,
         "clock_mapping_calibration_id": (
             calibration.clock_mapping_calibration_id
@@ -322,6 +334,45 @@ def _metadata_record(
             "T_A_B maps coordinates from frame B into frame A"
         ),
     }
+
+
+def _validate_server_rigid_body_definition(
+    metadata: Mapping[str, object],
+    calibration: PelvisReferenceCalibration,
+) -> None:
+    if metadata.get("rigid_body_identity_validated") is not True:
+        raise OptiTrackReferenceError(
+            "raw capture lacks a Motive-validated rigid-body identity"
+        )
+    if metadata.get("server_rigid_body_name") != calibration.rigid_body_name:
+        raise OptiTrackReferenceError(
+            "Motive rigid-body name does not match pelvis calibration"
+        )
+    marker_count = metadata.get("server_rigid_body_marker_count")
+    markers = metadata.get("server_rigid_body_markers")
+    if (
+        not isinstance(marker_count, int)
+        or marker_count < 3
+        or not isinstance(markers, list)
+        or len(markers) != marker_count
+    ):
+        raise OptiTrackReferenceError(
+            "Motive rigid-body marker definition is missing or inconsistent"
+        )
+    for expected_index, marker in enumerate(markers):
+        if not isinstance(marker, Mapping):
+            raise OptiTrackReferenceError(
+                "Motive rigid-body marker entry must be an object"
+            )
+        if marker.get("index") != expected_index:
+            raise OptiTrackReferenceError(
+                "Motive rigid-body marker indices must be contiguous"
+            )
+        _tuple_of_floats(
+            marker.get("position_xyz_m"),
+            expected_length=3,
+            field_name="Motive marker position_xyz_m",
+        )
 
 
 def _invalid_reason(
@@ -512,6 +563,7 @@ def convert_raw_optitrack_records(
         raise OptiTrackReferenceError(
             "raw rigid-body identity does not match calibration identity"
         )
+    _validate_server_rigid_body_definition(metadata, calibration)
 
     target_from_motive_translation = np.asarray(
         calibration.motive_world_to_target_translation_m,
