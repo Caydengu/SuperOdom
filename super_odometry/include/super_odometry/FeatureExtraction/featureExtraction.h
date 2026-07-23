@@ -8,7 +8,9 @@
 // #include "super_odometry/logging.h"
 
 
+#include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <sophus/so3.hpp>
@@ -21,6 +23,7 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <super_odometry_msgs/msg/laser_feature.hpp>
+#include <super_odometry_msgs/msg/lidar_pipeline_event.hpp>
 
 #include "super_odometry/container/MapRingBuffer.h"
 #include "super_odometry/sensor_data/imu/imu_data.h"
@@ -144,6 +147,13 @@ namespace super_odometry {
 
         void manageLidarBuffer(pcl::PointCloud<point_os::PointcloudXYZITR>::Ptr pointCloud, double timestamp);
 
+        void publishLidarPipelineEvent(
+            std::uint8_t event_type,
+            std::uint64_t input_count,
+            const builtin_interfaces::msg::Time & scan_reference_stamp,
+            const builtin_interfaces::msg::Time & newest_observation_stamp,
+            std::uint32_t queue_depth);
+
         ImuMeasurement parseImuMessage(const sensor_msgs::msg::Imu::SharedPtr& msg);
 
         double calculateDeltaTime(double current_timestamp);
@@ -199,13 +209,17 @@ namespace super_odometry {
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubPlannerPoints;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubBobPoints;
         rclcpp::Publisher<super_odometry_msgs::msg::LaserFeature>::SharedPtr pubLaserFeatureInfo;
+        rclcpp::Publisher<super_odometry_msgs::msg::LidarPipelineEvent>::SharedPtr
+            pubLidarPipelineEvent;
         std::vector<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr> pubEachScan;
 
         rclcpp::CallbackGroup::SharedPtr cb_group_;
 
         int delay_count_;
         std::mutex m_buf;
-        int frameCount = 0;
+        std::atomic<std::uint64_t> rawInputCount{0};
+        std::atomic<std::uint64_t> featurePublishedCount{0};
+        std::atomic<std::uint64_t> featureDroppedCount{0};
 
         bool PUB_EACH_LINE = false;
         bool LASER_IMU_SYNC_SCCUESS = false;

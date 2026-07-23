@@ -93,6 +93,11 @@ namespace super_odometry {
         pubLaserFeatureInfo = this->create_publisher<super_odometry_msgs::msg::LaserFeature>(
             ProjectName+"/feature_info", 2);
 
+        pubLidarPipelineEvent =
+            this->create_publisher<super_odometry_msgs::msg::LidarPipelineEvent>(
+                ProjectName+"/lidar_pipeline_events",
+                rclcpp::QoS(rclcpp::KeepLast(1000)).reliable());
+
         pubBobPoints = this->create_publisher<sensor_msgs::msg::PointCloud2>(
             ProjectName+"/bob_points", 2);
 
@@ -167,6 +172,31 @@ namespace super_odometry {
             config_.sensor = SensorType::OUSTER;
         } 
         return true;
+    }
+
+    void featureExtraction::publishLidarPipelineEvent(
+        std::uint8_t event_type,
+        std::uint64_t input_count,
+        const builtin_interfaces::msg::Time & scan_reference_stamp,
+        const builtin_interfaces::msg::Time & newest_observation_stamp,
+        std::uint32_t queue_depth)
+    {
+        if (!pubLidarPipelineEvent) {
+            return;
+        }
+        super_odometry_msgs::msg::LidarPipelineEvent event;
+        event.header.stamp = static_cast<builtin_interfaces::msg::Time>(
+            this->get_clock()->now());
+        event.header.frame_id = "feature_extraction";
+        event.semantics_version = "superodom-lidar-pipeline-event-v1";
+        event.event_type = event_type;
+        event.input_count = input_count;
+        event.output_count = featurePublishedCount.load();
+        event.dropped_count = featureDroppedCount.load();
+        event.queue_depth = queue_depth;
+        event.scan_reference_stamp = scan_reference_stamp;
+        event.newest_observation_stamp = newest_observation_stamp;
+        pubLidarPipelineEvent->publish(event);
     }
 
 
@@ -623,6 +653,13 @@ void featureExtraction::removePointDistortion(
         laserFeature.imu_available = true;
         laserFeature.sensor = 0; 
         pubLaserFeatureInfo->publish(laserFeature);
+        featurePublishedCount.fetch_add(1);
+        publishLidarPipelineEvent(
+            super_odometry_msgs::msg::LidarPipelineEvent::FEATURE_PUBLISHED,
+            rawInputCount.load(),
+            laserFeature.header.stamp,
+            laserFeature.newest_observation_stamp,
+            static_cast<std::uint32_t>(lidarBuf.getSize()));
     }
 
     void featureExtraction::extractFeatures(
@@ -970,10 +1007,26 @@ int featureExtraction::calculateAdaptiveSkip(const pcl::PointCloud<point_os::Poi
 
     void featureExtraction::laserCloudHandler(const sensor_msgs::msg::PointCloud2::SharedPtr laserCloudMsg)
     {  
+        const std::uint64_t input_count = rawInputCount.fetch_add(1) + 1;
+        const builtin_interfaces::msg::Time unknown_stamp;
+        publishLidarPipelineEvent(
+            super_odometry_msgs::msg::LidarPipelineEvent::RAW_RECEIVED,
+            input_count,
+            laserCloudMsg->header.stamp,
+            unknown_stamp,
+            0);
+
         // Check if we should process this frame based on skip count
-        frameCount = frameCount + 1;
-        if (frameCount % config_.skipFrame != 0)
+        if (input_count % static_cast<std::uint64_t>(config_.skipFrame) != 0) {
+            featureDroppedCount.fetch_add(1);
+            publishLidarPipelineEvent(
+                super_odometry_msgs::msg::LidarPipelineEvent::RAW_SKIPPED,
+                input_count,
+                laserCloudMsg->header.stamp,
+                unknown_stamp,
+                0);
             return;
+        }
 
         m_buf.lock();
 
@@ -1043,6 +1096,19 @@ int featureExtraction::calculateAdaptiveSkip(const pcl::PointCloud<point_os::Poi
             double lidar_first_time;
             lidarBuf.getFirstTime(lidar_first_time);
             lidarBuf.clean(lidar_first_time);
+            featureDroppedCount.fetch_add(1);
+            const builtin_interfaces::msg::Time scan_reference_stamp =
+                static_cast<builtin_interfaces::msg::Time>(
+                    rclcpp::Time(
+                        static_cast<int64_t>(std::llround(timestamp * 1e9)),
+                        RCL_ROS_TIME));
+            const builtin_interfaces::msg::Time unknown_stamp;
+            publishLidarPipelineEvent(
+                super_odometry_msgs::msg::LidarPipelineEvent::RAW_SKIPPED,
+                rawInputCount.load(),
+                scan_reference_stamp,
+                unknown_stamp,
+                static_cast<std::uint32_t>(curLidarBufferSize));
             RCLCPP_WARN(this->get_logger(), "Lidar buffer too large, dropping frame");
             curLidarBufferSize = lidarBuf.getSize();
         }
@@ -1054,9 +1120,25 @@ int featureExtraction::calculateAdaptiveSkip(const pcl::PointCloud<point_os::Poi
 #ifdef LIVOX_DRIVER_AVAILABLE
     void featureExtraction::livoxHandler(const livox_ros_driver2::msg::CustomMsg::UniquePtr msg)
     {   
-        frameCount = frameCount + 1;
-        if (frameCount % config_.skipFrame != 0)
+        const std::uint64_t input_count = rawInputCount.fetch_add(1) + 1;
+        const builtin_interfaces::msg::Time unknown_stamp;
+        publishLidarPipelineEvent(
+            super_odometry_msgs::msg::LidarPipelineEvent::RAW_RECEIVED,
+            input_count,
+            msg->header.stamp,
+            unknown_stamp,
+            0);
+
+        if (input_count % static_cast<std::uint64_t>(config_.skipFrame) != 0) {
+            featureDroppedCount.fetch_add(1);
+            publishLidarPipelineEvent(
+                super_odometry_msgs::msg::LidarPipelineEvent::RAW_SKIPPED,
+                input_count,
+                msg->header.stamp,
+                unknown_stamp,
+                0);
             return; 
+        }
 
         m_buf.lock();
         

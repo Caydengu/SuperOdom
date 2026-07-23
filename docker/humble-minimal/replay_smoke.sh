@@ -163,7 +163,9 @@ for executable in feature_extraction_node laser_mapping_node imu_preintegration_
   assert_process_sim_time "$executable"
 done
 
-ros2 bag record --use-sim-time -o "$output" /state_estimation &
+ros2 bag record --use-sim-time -o "$output" \
+  /state_estimation \
+  /lidar_pipeline_events &
 record_pid=$!
 kill -0 "$record_pid" 2>/dev/null || { echo "Recorder exited before playback" >&2; exit 1; }
 assert_recorder_clock_endpoint
@@ -184,3 +186,14 @@ message_count="$(sed -n '/Topic: \/state_estimation/ s/.*Count: \([0-9][0-9]*\).
   exit 1
 }
 echo "Validated /state_estimation messages: $message_count"
+
+pipeline_event_count="$(
+  sed -n \
+    '/Topic: \/lidar_pipeline_events/ s/.*Count: \([0-9][0-9]*\).*/\1/p' \
+    <<<"$bag_info" | head -n 1
+)"
+[[ "$pipeline_event_count" =~ ^[0-9]+$ ]] && (( pipeline_event_count > 0 )) || {
+  echo "Replay produced no /lidar_pipeline_events messages" >&2
+  exit 1
+}
+echo "Validated /lidar_pipeline_events messages: $pipeline_event_count"

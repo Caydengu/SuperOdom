@@ -42,6 +42,8 @@ def test_replay_time_is_explicit_and_live_default_is_safe() -> None:
     assert "assert_recorder_clock_endpoint" in replay
     assert "Node name: rosbag2_recorder" in replay
     assert "ros2 topic pub" not in replay
+    assert "/lidar_pipeline_events" in replay
+    assert "Validated /lidar_pipeline_events messages" in replay
 
 
 def test_dependency_lock_contains_full_revisions() -> None:
@@ -244,6 +246,7 @@ def test_shell_scripts_are_syntactically_valid() -> None:
         ROOT / "docker/humble-minimal/replay_smoke.sh",
         ROOT / "docker/humble-minimal/live_input_probe.sh",
         ROOT / "docker/humble-minimal/live_shadow.sh",
+        ROOT / "docker/humble-minimal/root_state_shadow.sh",
         ROOT / "scripts/test_minimal_container.sh",
     ]
     for script in scripts:

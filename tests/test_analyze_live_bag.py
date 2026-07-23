@@ -156,3 +156,52 @@ def test_correction_gap_events_localize_gaps_before_mapping_output() -> None:
         "optimization_ms": 10.0,
         "frame_processing_ms": 13.0,
     }
+
+
+def test_pipeline_gap_attribution_separates_raw_and_mapping_loss() -> None:
+    module = load_module()
+    cadence = 100_000_000
+    correction_reference = [0, cadence, 4 * cadence]
+
+    mapping_loss = module.pipeline_gap_attribution(
+        correction_reference_ns=correction_reference,
+        raw_reference_ns=[0, cadence, 2 * cadence, 3 * cadence, 4 * cadence],
+        feature_reference_ns=[0, cadence, 2 * cadence, 3 * cadence, 4 * cadence],
+        mapping_reference_ns=[0, cadence, 2 * cadence, 3 * cadence, 4 * cadence],
+        mapping_drop_reference_ns=[cadence],
+        threshold_ms=250.0,
+        match_tolerance_ms=5.0,
+    )
+    assert mapping_loss["count"] == 1
+    assert mapping_loss["events"][0]["candidate_stage"] == "mapping_queue_or_output"
+    assert mapping_loss["events"][0]["mapping_drop_event_count"] == 1
+    assert math.isclose(mapping_loss["events"][0]["raw_gap_ms"], 100.0)
+
+    raw_loss = module.pipeline_gap_attribution(
+        correction_reference_ns=correction_reference,
+        raw_reference_ns=correction_reference,
+        feature_reference_ns=correction_reference,
+        mapping_reference_ns=correction_reference,
+        mapping_drop_reference_ns=[],
+        threshold_ms=250.0,
+        match_tolerance_ms=5.0,
+    )
+    assert raw_loss["events"][0]["candidate_stage"] == "raw_delivery"
+    assert math.isclose(raw_loss["events"][0]["raw_gap_ms"], 300.0)
+
+
+def test_pipeline_gap_attribution_orders_concurrent_stage_events_by_reference() -> None:
+    module = load_module()
+    cadence = 100_000_000
+    result = module.pipeline_gap_attribution(
+        correction_reference_ns=[0, 4 * cadence],
+        raw_reference_ns=[0, 2 * cadence, cadence, 4 * cadence, 3 * cadence],
+        feature_reference_ns=[0, cadence, 2 * cadence, 3 * cadence, 4 * cadence],
+        mapping_reference_ns=[0, cadence, 2 * cadence, 3 * cadence, 4 * cadence],
+        mapping_drop_reference_ns=[],
+        threshold_ms=250.0,
+        match_tolerance_ms=5.0,
+    )
+
+    assert result["events"][0]["candidate_stage"] == "mapping_queue_or_output"
+    assert math.isclose(result["events"][0]["raw_gap_ms"], 100.0)

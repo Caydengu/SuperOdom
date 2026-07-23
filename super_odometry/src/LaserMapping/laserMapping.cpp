@@ -77,6 +77,11 @@ namespace super_odometry {
             this->create_publisher<super_odometry_msgs::msg::LidarCorrection>(
                 ProjectName+"/lidar_correction", 5);
 
+        pubLidarPipelineEvent =
+            this->create_publisher<super_odometry_msgs::msg::LidarPipelineEvent>(
+                ProjectName+"/lidar_pipeline_events",
+                rclcpp::QoS(rclcpp::KeepLast(1000)).reliable());
+
         pubLaserOdometryIncremental = this->create_publisher<nav_msgs::msg::Odometry>(
             ProjectName+"/aft_mapped_to_init_incremental", 1);
 
@@ -251,6 +256,7 @@ namespace super_odometry {
    
 
     void laserMapping::laserFeatureInfoHandler(const super_odometry_msgs::msg::LaserFeature::SharedPtr msgIn) {
+        mappingInputCount.fetch_add(1);
         const double scan_start = secs(msgIn.get());
         const double scan_end =
             msgIn->newest_observation_stamp.sec +
@@ -260,6 +266,12 @@ namespace super_odometry {
                 this->get_logger(),
                 "Rejecting feature scan with invalid observation interval: start=%.9f end=%.9f",
                 scan_start, scan_end);
+            mappingDroppedCount.fetch_add(1);
+            publishLidarPipelineEvent(
+                super_odometry_msgs::msg::LidarPipelineEvent::MAPPING_REJECTED,
+                0,
+                msgIn->header.stamp,
+                msgIn->newest_observation_stamp);
             return;
         }
 
@@ -276,7 +288,38 @@ namespace super_odometry {
         Transformd imuposes(imu_orientation, imu_position);
         
         IMUPredictionBuf.push(imuposes);
+        const std::uint32_t queue_depth =
+            static_cast<std::uint32_t>(fullResBuf.size());
         mBuf.unlock();
+        publishLidarPipelineEvent(
+            super_odometry_msgs::msg::LidarPipelineEvent::MAPPING_RECEIVED,
+            queue_depth,
+            msgIn->header.stamp,
+            msgIn->newest_observation_stamp);
+    }
+
+    void laserMapping::publishLidarPipelineEvent(
+        std::uint8_t event_type,
+        std::uint32_t queue_depth,
+        const builtin_interfaces::msg::Time & scan_reference_stamp,
+        const builtin_interfaces::msg::Time & newest_observation_stamp)
+    {
+        if (!pubLidarPipelineEvent) {
+            return;
+        }
+        super_odometry_msgs::msg::LidarPipelineEvent event;
+        event.header.stamp = static_cast<builtin_interfaces::msg::Time>(
+            this->get_clock()->now());
+        event.header.frame_id = "laser_mapping";
+        event.semantics_version = "superodom-lidar-pipeline-event-v1";
+        event.event_type = event_type;
+        event.input_count = mappingInputCount.load();
+        event.output_count = mappingOutputCount.load();
+        event.dropped_count = mappingDroppedCount.load();
+        event.queue_depth = queue_depth;
+        event.scan_reference_stamp = scan_reference_stamp;
+        event.newest_observation_stamp = newest_observation_stamp;
+        pubLidarPipelineEvent->publish(event);
     }
 
 
@@ -611,6 +654,12 @@ return PredictionSource::CONSTANT_VELOCITY;
             static_cast<builtin_interfaces::msg::Time>(pub_time);
         timed_correction.odometry = odomAftMapped;
         pubLidarCorrection->publish(timed_correction);
+        mappingOutputCount.fetch_add(1);
+        publishLidarPipelineEvent(
+            super_odometry_msgs::msg::LidarPipelineEvent::CORRECTION_PUBLISHED,
+            0,
+            timed_correction.odometry.header.stamp,
+            timed_correction.newest_observation_stamp);
 
         geometry_msgs::msg::PoseStamped laserAfterMappedPose;
         laserAfterMappedPose.header = odomAftMapped.header;
@@ -713,6 +762,9 @@ return PredictionSource::CONSTANT_VELOCITY;
         surfLastBuf.pop();
         pcl::fromROSMsg(fullResBuf.front(), *laserCloudFullRes);
         fullResBuf.pop();
+        if (!realsenseBuf.empty()) {
+            realsenseBuf.pop();
+        }
 
         //3. Extract IMU prediction 
       
@@ -729,20 +781,6 @@ return PredictionSource::CONSTANT_VELOCITY;
 
         return data;
     }
-
-    void laserMapping::clearSensorData(){
-        auto clearBuffer=[](auto&buffer){
-            while(!buffer.empty()){
-                buffer.pop();
-            }
-        };
-        clearBuffer(cornerLastBuf);
-        clearBuffer(surfLastBuf);
-        clearBuffer(fullResBuf);
-        clearBuffer(newestObservationTimeBuf);
-        clearBuffer(IMUPredictionBuf);
-    }
-
 
     void laserMapping::performSLAMOptimization(){
         tf2::Quaternion imu_roll_pitch;
@@ -827,17 +865,21 @@ return PredictionSource::CONSTANT_VELOCITY;
     void laserMapping::process() {
 
         while (rclcpp::ok()) {
-            if(!checkDataAvailable()){
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                continue;
-            }
             try{
+                bool data_available = false;
+                {
+                    std::lock_guard<std::mutex> lock(mBuf);
+                    data_available = checkDataAvailable();
+                    if (data_available) {
+                        sensorMeas=extractSensorData();
+                    }
+                }
+                if (!data_available) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    continue;
+                }
                 utils::ScopedTimer timer("Frame Processing");
                 rclcpp::Time processing_start = rclcpp::Clock{RCL_ROS_TIME}.now();
-                mBuf.lock(); 
-                sensorMeas=extractSensorData();
-                clearSensorData();
-                mBuf.unlock();
                 setInitialGuess();
                 adjustVoxelSize();
                 performSLAMOptimization();

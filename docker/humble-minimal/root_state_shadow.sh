@@ -189,6 +189,7 @@ record_topics=(
   /state_estimation
   /laser_odometry
   /lidar_correction
+  /lidar_pipeline_events
   /super_odometry_stats
   /state_estimation_health
   /state_estimation_calibration
@@ -221,6 +222,7 @@ bridge_pid=$!
 
 wait_for_type /state_estimation nav_msgs/msg/Odometry 45
 wait_for_type /state_estimation_correction super_odometry_msgs/msg/StateEstimationCorrection 45
+wait_for_type /lidar_pipeline_events super_odometry_msgs/msg/LidarPipelineEvent 45
 wait_for_type /pelvis_state_estimation nav_msgs/msg/Odometry 60
 timeout 60s ros2 topic echo --once /pelvis_state_estimation \
   > /output/logs/first_pelvis_state.txt

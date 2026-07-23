@@ -6,7 +6,9 @@
 #ifndef super_odometry_LASERMAPPING_H
 #define super_odometry_LASERMAPPING_H
 
+#include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <queue>
 #include <string>
@@ -38,6 +40,7 @@
 #include "super_odometry/container/MapRingBuffer.h"
 #include <super_odometry_msgs/msg/laser_feature.hpp>
 #include <super_odometry_msgs/msg/lidar_correction.hpp>
+#include <super_odometry_msgs/msg/lidar_pipeline_event.hpp>
 #include "super_odometry/config/parameter.h"
 #include <std_msgs/msg/string.hpp>
 #include "super_odometry/utils/superodom_utils.h"
@@ -149,7 +152,11 @@ namespace super_odometry {
 
         SensorData extractSensorData();
 
-        void clearSensorData();
+        void publishLidarPipelineEvent(
+            std::uint8_t event_type,
+            std::uint32_t queue_depth,
+            const builtin_interfaces::msg::Time & scan_reference_stamp,
+            const builtin_interfaces::msg::Time & newest_observation_stamp);
 
         bool useIMUPrediction(const Eigen::Quaterniond& imuPrediction);
 
@@ -207,6 +214,8 @@ namespace super_odometry {
         rclcpp::Publisher<super_odometry_msgs::msg::OptimizationStats>::SharedPtr pubOptimizationStats;
         rclcpp::Publisher<super_odometry_msgs::msg::LidarCorrection>::SharedPtr
             pubLidarCorrection;
+        rclcpp::Publisher<super_odometry_msgs::msg::LidarPipelineEvent>::SharedPtr
+            pubLidarPipelineEvent;
         rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubLaserOdometryIncremental;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubPreviousCloud;
         rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubPreviousPose;
@@ -235,6 +244,9 @@ namespace super_odometry {
         double timeLaserOdometryPrev = 0;
         double timeNewestLidarObservation = 0;
         std::uint64_t lidarCorrectionSequence = 0;
+        std::atomic<std::uint64_t> mappingInputCount{0};
+        std::atomic<std::uint64_t> mappingOutputCount{0};
+        std::atomic<std::uint64_t> mappingDroppedCount{0};
 
 
         bool got_previous_map = false;

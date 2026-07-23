@@ -90,6 +90,72 @@ def test_superodometry_exposes_explicit_scan_and_applied_correction_times() -> N
     assert 'ProjectName+"/state_estimation_correction"' in preintegration_source
 
 
+def test_lidar_pipeline_events_instrument_the_existing_sole_subscriber() -> None:
+    message = _read("super_odometry_msgs/msg/LidarPipelineEvent.msg")
+    for field in (
+        "uint8 RAW_RECEIVED=1",
+        "uint8 RAW_SKIPPED=2",
+        "uint8 FEATURE_PUBLISHED=3",
+        "uint8 MAPPING_RECEIVED=4",
+        "uint8 MAPPING_QUEUE_DROPPED=5",
+        "uint8 CORRECTION_PUBLISHED=6",
+        "uint8 MAPPING_REJECTED=7",
+        "std_msgs/Header header",
+        "string semantics_version",
+        "uint8 event_type",
+        "uint64 input_count",
+        "uint64 output_count",
+        "uint64 dropped_count",
+        "uint32 queue_depth",
+        "builtin_interfaces/Time scan_reference_stamp",
+        "builtin_interfaces/Time newest_observation_stamp",
+    ):
+        assert field in message
+
+    message_cmake = _read("super_odometry_msgs/CMakeLists.txt")
+    assert '"msg/LidarPipelineEvent.msg"' in message_cmake
+
+    feature_header = _read(
+        "super_odometry/include/super_odometry/FeatureExtraction/featureExtraction.h"
+    )
+    feature_source = _read(
+        "super_odometry/src/FeatureExtraction/featureExtraction.cpp"
+    )
+    mapping_header = _read(
+        "super_odometry/include/super_odometry/LaserMapping/laserMapping.h"
+    )
+    mapping_source = _read("super_odometry/src/LaserMapping/laserMapping.cpp")
+    shadow = _read("docker/humble-minimal/root_state_shadow.sh")
+
+    assert "pubLidarPipelineEvent" in feature_header
+    assert "RAW_RECEIVED" in feature_source
+    assert "FEATURE_PUBLISHED" in feature_source
+    assert "pubLidarPipelineEvent" in mapping_header
+    assert "MAPPING_RECEIVED" in mapping_source
+    assert "MAPPING_REJECTED" in mapping_source
+    assert "CORRECTION_PUBLISHED" in mapping_source
+    assert "mappingDroppedCount" in mapping_source
+    assert 'ProjectName+"/lidar_pipeline_events"' in feature_source
+    assert 'ProjectName+"/lidar_pipeline_events"' in mapping_source
+    assert "/lidar_pipeline_events" in shadow
+    assert (
+        feature_source.count(
+            "create_subscription<livox_ros_driver2::msg::CustomMsg>"
+        )
+        == 1
+    )
+
+
+def test_mapping_drains_feature_queue_without_clearing_newer_frames() -> None:
+    mapping_source = _read("super_odometry/src/LaserMapping/laserMapping.cpp")
+    process = mapping_source.split("void laserMapping::process()", maxsplit=1)[1]
+
+    assert "sensorMeas=extractSensorData();" in process
+    assert "clearSensorData();" not in process
+    assert "std::lock_guard<std::mutex> lock(mBuf)" in process
+    assert "realsenseBuf.pop();" in mapping_source
+
+
 def test_bridge_is_an_ament_python_package_with_typed_ros_inputs() -> None:
     package = _read("g1_root_state_bridge/package.xml")
     setup = _read("g1_root_state_bridge/setup.py")

@@ -428,6 +428,100 @@ def correction_gap_events(
     }
 
 
+def _stage_gap_ending_at(
+    timestamps_ns: Sequence[int],
+    target_ns: int,
+    tolerance_ns: int,
+) -> float | None:
+    ordered_timestamps_ns = sorted(int(timestamp) for timestamp in timestamps_ns)
+    if len(ordered_timestamps_ns) < 2:
+        return None
+    ending_index = min(
+        range(len(ordered_timestamps_ns)),
+        key=lambda index: abs(ordered_timestamps_ns[index] - int(target_ns)),
+    )
+    if (
+        ending_index == 0
+        or abs(ordered_timestamps_ns[ending_index] - int(target_ns)) > tolerance_ns
+    ):
+        return None
+    return (
+        ordered_timestamps_ns[ending_index]
+        - ordered_timestamps_ns[ending_index - 1]
+    ) / 1e6
+
+
+def pipeline_gap_attribution(
+    *,
+    correction_reference_ns: Sequence[int],
+    raw_reference_ns: Sequence[int],
+    feature_reference_ns: Sequence[int],
+    mapping_reference_ns: Sequence[int],
+    mapping_drop_reference_ns: Sequence[int],
+    threshold_ms: float,
+    match_tolerance_ms: float,
+) -> dict[str, Any]:
+    tolerance_ns = int(round(match_tolerance_ms * 1e6))
+    events: list[dict[str, Any]] = []
+    for index in range(1, len(correction_reference_ns)):
+        previous = int(correction_reference_ns[index - 1])
+        current = int(correction_reference_ns[index])
+        correction_gap_ms = (current - previous) / 1e6
+        if correction_gap_ms <= threshold_ms:
+            continue
+
+        raw_gap_ms = _stage_gap_ending_at(
+            raw_reference_ns, current, tolerance_ns
+        )
+        feature_gap_ms = _stage_gap_ending_at(
+            feature_reference_ns, current, tolerance_ns
+        )
+        mapping_gap_ms = _stage_gap_ending_at(
+            mapping_reference_ns, current, tolerance_ns
+        )
+        if raw_gap_ms is None:
+            candidate_stage = "instrumentation_incomplete"
+        elif raw_gap_ms > threshold_ms:
+            candidate_stage = "raw_delivery"
+        elif feature_gap_ms is None:
+            candidate_stage = "instrumentation_incomplete"
+        elif feature_gap_ms > threshold_ms:
+            candidate_stage = "feature_extraction"
+        elif mapping_gap_ms is None:
+            candidate_stage = "instrumentation_incomplete"
+        elif mapping_gap_ms > threshold_ms:
+            candidate_stage = "feature_to_mapping_transport"
+        else:
+            candidate_stage = "mapping_queue_or_output"
+
+        events.append(
+            {
+                "ending_index": index,
+                "previous_reference_ns": previous,
+                "ending_reference_ns": current,
+                "correction_gap_ms": correction_gap_ms,
+                "raw_gap_ms": raw_gap_ms,
+                "feature_gap_ms": feature_gap_ms,
+                "mapping_gap_ms": mapping_gap_ms,
+                "mapping_drop_event_count": sum(
+                    previous <= int(reference) <= current
+                    for reference in mapping_drop_reference_ns
+                ),
+                "candidate_stage": candidate_stage,
+            }
+        )
+    return {
+        "threshold_ms": float(threshold_ms),
+        "match_tolerance_ms": float(match_tolerance_ms),
+        "count": len(events),
+        "candidate_stage_counts": {
+            stage: sum(event["candidate_stage"] == stage for event in events)
+            for stage in sorted({event["candidate_stage"] for event in events})
+        },
+        "events": events,
+    }
+
+
 def timestamp_correspondence(source_ns: Sequence[int], output_ns: Sequence[int]) -> dict[str, Any]:
     source = set(source_ns)
     output = set(output_ns)
@@ -500,6 +594,17 @@ def analyze_bag(bag_path: Path, launch_wall_ns: int | None = None) -> dict[str, 
     stats_rotation_from_last: list[float] = []
     health_values: list[bool] = []
     prediction_sources: list[str] = []
+    pipeline_event_types: list[int] = []
+    pipeline_event_publication: list[int] = []
+    pipeline_event_receipt: list[int] = []
+    pipeline_event_reference: list[int] = []
+    pipeline_event_evidence: list[int] = []
+    pipeline_event_input_count: list[int] = []
+    pipeline_event_output_count: list[int] = []
+    pipeline_event_dropped_count: list[int] = []
+    pipeline_event_queue_depth: list[int] = []
+    pipeline_event_frame: list[str] = []
+    pipeline_event_semantics: list[str] = []
 
     while reader.has_next():
         topic, serialized, receipt_ns = reader.read_next()
@@ -586,6 +691,22 @@ def analyze_bag(bag_path: Path, launch_wall_ns: int | None = None) -> dict[str, 
             health_values.append(bool(message.data))
         elif topic == "/prediction_source":
             prediction_sources.append(str(message.data))
+        elif topic == "/lidar_pipeline_events":
+            pipeline_event_types.append(int(message.event_type))
+            pipeline_event_publication.append(_stamp_ns(message.header.stamp))
+            pipeline_event_receipt.append(int(receipt_ns))
+            pipeline_event_reference.append(
+                _stamp_ns(message.scan_reference_stamp)
+            )
+            pipeline_event_evidence.append(
+                _stamp_ns(message.newest_observation_stamp)
+            )
+            pipeline_event_input_count.append(int(message.input_count))
+            pipeline_event_output_count.append(int(message.output_count))
+            pipeline_event_dropped_count.append(int(message.dropped_count))
+            pipeline_event_queue_depth.append(int(message.queue_depth))
+            pipeline_event_frame.append(str(message.header.frame_id))
+            pipeline_event_semantics.append(str(message.semantics_version))
 
     result: dict[str, Any] = {
         "bag_path": str(bag_path),
@@ -643,6 +764,128 @@ def analyze_bag(bag_path: Path, launch_wall_ns: int | None = None) -> dict[str, 
             value: prediction_sources.count(value) for value in sorted(set(prediction_sources))
         } if prediction_sources else None,
     }
+    if pipeline_event_types:
+        event_names = {
+            1: "raw_received",
+            2: "raw_skipped",
+            3: "feature_published",
+            4: "mapping_received",
+            5: "mapping_queue_dropped",
+            6: "correction_published",
+            7: "mapping_rejected",
+        }
+        stage_indices = {
+            name: [
+                index
+                for index, value in enumerate(pipeline_event_types)
+                if value == event_type
+            ]
+            for event_type, name in event_names.items()
+        }
+
+        def stage_values(values: Sequence[Any], stage: str) -> list[Any]:
+            return [values[index] for index in stage_indices[stage]]
+
+        stage_metrics = {}
+        for stage in (
+            "raw_received",
+            "feature_published",
+            "mapping_received",
+            "correction_published",
+        ):
+            indices = sorted(
+                stage_indices[stage],
+                key=lambda index: pipeline_event_reference[index],
+            )
+            references = [pipeline_event_reference[index] for index in indices]
+            receipts = [pipeline_event_receipt[index] for index in indices]
+            evidence = [pipeline_event_evidence[index] for index in indices]
+            if not references:
+                stage_metrics[stage] = None
+                continue
+            valid_evidence = [
+                (reference, newest_observation, receipt)
+                for reference, newest_observation, receipt in zip(
+                    references, evidence, receipts
+                )
+                if newest_observation > 0
+            ]
+            stage_metrics[stage] = {
+                **series_metrics(references, receipts),
+                "valid_evidence_count": len(valid_evidence),
+                "scan_duration_ms": distribution(
+                    (newest_observation - reference) / 1e6
+                    for reference, newest_observation, _ in valid_evidence
+                ),
+                "newest_observation_age_at_receipt_ms": distribution(
+                    (receipt - newest_observation) / 1e6
+                    for _, newest_observation, receipt in valid_evidence
+                ),
+            }
+
+        feature_indices = [
+            index
+            for index, value in enumerate(pipeline_event_types)
+            if value in (1, 2, 3)
+        ]
+        mapping_indices = [
+            index
+            for index, value in enumerate(pipeline_event_types)
+            if value in (4, 5, 6, 7)
+        ]
+
+        def terminal_counters(indices: Sequence[int]) -> dict[str, int] | None:
+            if not indices:
+                return None
+            return {
+                "input_count": max(pipeline_event_input_count[index] for index in indices),
+                "output_count": max(pipeline_event_output_count[index] for index in indices),
+                "dropped_count": max(
+                    pipeline_event_dropped_count[index] for index in indices
+                ),
+                "maximum_queue_depth": max(
+                    pipeline_event_queue_depth[index] for index in indices
+                ),
+            }
+
+        result["lidar_pipeline_events"] = {
+            "count": len(pipeline_event_types),
+            "semantics_versions": sorted(set(pipeline_event_semantics)),
+            "publisher_frames": sorted(set(pipeline_event_frame)),
+            "event_type_counts": {
+                name: len(stage_indices[name]) for name in event_names.values()
+            },
+            "event_publication_transport_ms": distribution(
+                (receipt - publication) / 1e6
+                for publication, receipt in zip(
+                    pipeline_event_publication, pipeline_event_receipt
+                )
+            ),
+            "terminal_counters": {
+                "feature_extraction": terminal_counters(feature_indices),
+                "laser_mapping": terminal_counters(mapping_indices),
+            },
+            "stage_metrics": stage_metrics,
+            "gap_attribution": pipeline_gap_attribution(
+                correction_reference_ns=state_correction_reference,
+                raw_reference_ns=sorted(
+                    stage_values(pipeline_event_reference, "raw_received")
+                ),
+                feature_reference_ns=sorted(
+                    stage_values(pipeline_event_reference, "feature_published")
+                ),
+                mapping_reference_ns=sorted(
+                    stage_values(pipeline_event_reference, "mapping_received")
+                ),
+                mapping_drop_reference_ns=stage_values(
+                    pipeline_event_reference, "mapping_queue_dropped"
+                ),
+                threshold_ms=250.0,
+                match_tolerance_ms=5.0,
+            )
+            if state_correction_reference
+            else None,
+        }
     if imu_header:
         result["imu"]["nonfinite_measurement_count"] = sum(
             not math.isfinite(float(value)) for value in imu_measurements

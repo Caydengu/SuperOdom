@@ -45,6 +45,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/OptimizationStats.msg"
   "msg/LaserFeature.msg"
   "msg/LidarCorrection.msg"
+  "msg/LidarPipelineEvent.msg"
   "msg/StateEstimationCalibration.msg"
   "msg/StateEstimationCorrection.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs std_msgs nav_msgs sensor_msgs
