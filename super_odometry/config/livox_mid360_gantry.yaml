@@ -41,6 +41,7 @@
 
     imu_preintegration_node:
         lidar_correction_noise: 0.01
+        predict_future_secs: 0.0
 
         acc_n: 3.9939570888238808e-03
         gyr_n: 1.5636343949698187e-03
