@@ -127,6 +127,30 @@ class PoseSample:
 
 
 @dataclass(frozen=True)
+class WaistJointSample:
+    """Synchronized waist joints used to prove a waist-only trial was excited."""
+
+    sequence: int
+    time_ns: int
+    position_rad: tuple[float, float, float]
+    valid: bool = True
+
+    def __post_init__(self) -> None:
+        if self.sequence < 0:
+            raise ValueError("waist joint sequence must be non-negative")
+        if self.time_ns < 0:
+            raise ValueError("waist joint time_ns must be non-negative")
+        position = _finite_tuple(
+            self.position_rad,
+            length=3,
+            field_name="waist joint position_rad",
+        )
+        if not isinstance(self.valid, bool):
+            raise ValueError("waist joint valid must be boolean")
+        object.__setattr__(self, "position_rad", position)
+
+
+@dataclass(frozen=True)
 class ClockMapping:
     """Validated affine mapping from a source clock into the target clock."""
 
@@ -163,11 +187,18 @@ class DynamicReferenceConfig:
     max_interpolation_gap_ns: int
     max_clock_mapping_residual_ns: int
     minimum_coverage: float
+    minimum_velocity_coverage: float
     horizontal_p95_limit_m: float
     vertical_p95_limit_m: float
     yaw_p95_limit_deg: float
     waist_position_residual_limit_m: float
     waist_yaw_residual_limit_deg: float
+    minimum_horizontal_excitation_m: float
+    minimum_vertical_excitation_m: float
+    minimum_yaw_excitation_deg: float
+    minimum_waist_joint_excitation_rad: float
+    maximum_waist_reference_translation_m: float
+    maximum_waist_reference_yaw_deg: float
 
     def __post_init__(self) -> None:
         if not self.target_clock_id or not self.reference_calibration_id:
@@ -180,18 +211,42 @@ class DynamicReferenceConfig:
             interval = getattr(self, name)
             if len(interval) != 2 or interval[0] < 0 or interval[1] <= interval[0]:
                 raise ValueError(f"{name} must be an increasing non-negative interval")
+        intervals = sorted(
+            (
+                self.calibration_interval_ns,
+                self.evaluation_interval_ns,
+                self.waist_interval_ns,
+            )
+        )
+        if any(
+            first[1] >= second[0]
+            for first, second in zip(intervals, intervals[1:])
+        ):
+            raise ValueError(
+                "calibration, evaluation, and waist intervals must be disjoint"
+            )
         if self.max_interpolation_gap_ns <= 0:
             raise ValueError("max_interpolation_gap_ns must be positive")
         if self.max_clock_mapping_residual_ns < 0:
             raise ValueError("max_clock_mapping_residual_ns must be non-negative")
         if not 0.0 < self.minimum_coverage <= 1.0:
             raise ValueError("minimum_coverage must be in (0, 1]")
+        if not 0.0 < self.minimum_velocity_coverage <= 1.0:
+            raise ValueError(
+                "minimum_velocity_coverage must be in (0, 1]"
+            )
         for name in (
             "horizontal_p95_limit_m",
             "vertical_p95_limit_m",
             "yaw_p95_limit_deg",
             "waist_position_residual_limit_m",
             "waist_yaw_residual_limit_deg",
+            "minimum_horizontal_excitation_m",
+            "minimum_vertical_excitation_m",
+            "minimum_yaw_excitation_deg",
+            "minimum_waist_joint_excitation_rad",
+            "maximum_waist_reference_translation_m",
+            "maximum_waist_reference_yaw_deg",
         ):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0.0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -447,6 +502,7 @@ def score_dynamic_reference(
     *,
     config: DynamicReferenceConfig,
     clock_mapping: ClockMapping | None = None,
+    waist_joint_samples: Iterable[WaistJointSample] = (),
 ) -> DynamicReferenceReport:
     """Score estimator pelvis samples against independent reference samples.
 
@@ -456,6 +512,7 @@ def score_dynamic_reference(
 
     estimator = list(estimator_samples)
     reference = list(reference_samples)
+    waist_joints = list(waist_joint_samples)
     reasons: list[str] = []
     if len(estimator) < 2:
         reasons.append("insufficient_estimator_samples")
@@ -472,6 +529,11 @@ def score_dynamic_reference(
         reasons.append("estimator_sequence_not_strictly_increasing")
     if not _strictly_increasing(reference, "sequence"):
         reasons.append("reference_sequence_not_strictly_increasing")
+    if waist_joints:
+        if not _strictly_increasing(waist_joints, "time_ns"):
+            reasons.append("waist_joint_time_not_strictly_increasing")
+        if not _strictly_increasing(waist_joints, "sequence"):
+            reasons.append("waist_joint_sequence_not_strictly_increasing")
 
     estimator_clock = _single_string_value(estimator, "clock_id")
     reference_clock = _single_string_value(reference, "clock_id")
@@ -565,6 +627,23 @@ def score_dynamic_reference(
             len(waist_matches) / waist_candidates if waist_candidates else 0.0
         ),
     }
+    waist_joint_candidates = [
+        sample
+        for sample in waist_joints
+        if config.waist_interval_ns[0]
+        <= sample.time_ns
+        <= config.waist_interval_ns[1]
+    ]
+    valid_waist_joints = [
+        sample for sample in waist_joint_candidates if sample.valid
+    ]
+    metrics["waist_joint_candidate_count"] = len(waist_joint_candidates)
+    metrics["waist_joint_valid_count"] = len(valid_waist_joints)
+    metrics["waist_joint_coverage"] = (
+        len(valid_waist_joints) / len(waist_joint_candidates)
+        if waist_joint_candidates
+        else 0.0
+    )
 
     if len(calibration_matches) < 3:
         reasons.append("insufficient_calibration_matches")
@@ -578,6 +657,107 @@ def score_dynamic_reference(
         reasons.append("insufficient_waist_matches")
     if metrics["waist_coverage"] < config.minimum_coverage:
         reasons.append("waist_coverage_below_minimum")
+    if len(valid_waist_joints) < 3:
+        reasons.append("insufficient_waist_joint_evidence")
+    if metrics["waist_joint_coverage"] < config.minimum_coverage:
+        reasons.append("waist_joint_coverage_below_minimum")
+    if reasons:
+        return _invalid_report(reasons, metrics=metrics)
+
+    evaluation_reference_positions = np.stack(
+        [match.reference.position for match in evaluation_matches]
+    )
+    evaluation_reference_rotations = [
+        match.reference.rotation for match in evaluation_matches
+    ]
+    initial_evaluation_position = evaluation_reference_positions[0]
+    initial_evaluation_yaw = _yaw_from_rotation(
+        evaluation_reference_rotations[0]
+    )
+    horizontal_excitation = max(
+        float(np.linalg.norm(position[:2] - initial_evaluation_position[:2]))
+        for position in evaluation_reference_positions
+    )
+    vertical_excitation = float(
+        np.max(evaluation_reference_positions[:, 2])
+        - np.min(evaluation_reference_positions[:, 2])
+    )
+    yaw_excitation_deg = max(
+        abs(
+            math.degrees(
+                _wrap_angle(
+                    _yaw_from_rotation(rotation) - initial_evaluation_yaw
+                )
+            )
+        )
+        for rotation in evaluation_reference_rotations
+    )
+
+    initial_waist_joint_position = np.asarray(
+        valid_waist_joints[0].position_rad,
+        dtype=np.float64,
+    )
+    waist_joint_excitation = max(
+        float(
+            np.linalg.norm(
+                np.asarray(sample.position_rad, dtype=np.float64)
+                - initial_waist_joint_position
+            )
+        )
+        for sample in valid_waist_joints
+    )
+
+    waist_reference_positions = np.stack(
+        [match.reference.position for match in waist_matches]
+    )
+    initial_waist_reference_position = waist_reference_positions[0]
+    initial_waist_reference_yaw = _yaw_from_rotation(
+        waist_matches[0].reference.rotation
+    )
+    waist_reference_translation = max(
+        float(
+            np.linalg.norm(position - initial_waist_reference_position)
+        )
+        for position in waist_reference_positions
+    )
+    waist_reference_yaw_deg = max(
+        abs(
+            math.degrees(
+                _wrap_angle(
+                    _yaw_from_rotation(match.reference.rotation)
+                    - initial_waist_reference_yaw
+                )
+            )
+        )
+        for match in waist_matches
+    )
+    metrics.update(
+        {
+            "horizontal_excitation_m": horizontal_excitation,
+            "vertical_excitation_m": vertical_excitation,
+            "yaw_excitation_deg": yaw_excitation_deg,
+            "waist_joint_excitation_rad": waist_joint_excitation,
+            "waist_reference_translation_max_m": (
+                waist_reference_translation
+            ),
+            "waist_reference_yaw_max_deg": waist_reference_yaw_deg,
+        }
+    )
+    if horizontal_excitation < config.minimum_horizontal_excitation_m:
+        reasons.append("horizontal_excitation_below_minimum")
+    if vertical_excitation < config.minimum_vertical_excitation_m:
+        reasons.append("vertical_excitation_below_minimum")
+    if yaw_excitation_deg < config.minimum_yaw_excitation_deg:
+        reasons.append("yaw_excitation_below_minimum")
+    if waist_joint_excitation < config.minimum_waist_joint_excitation_rad:
+        reasons.append("waist_joint_excitation_below_minimum")
+    if (
+        waist_reference_translation
+        > config.maximum_waist_reference_translation_m
+    ):
+        reasons.append("waist_reference_translation_exceeds_maximum")
+    if waist_reference_yaw_deg > config.maximum_waist_reference_yaw_deg:
+        reasons.append("waist_reference_yaw_exceeds_maximum")
     if reasons:
         return _invalid_report(reasons, metrics=metrics)
 
@@ -660,6 +840,12 @@ def score_dynamic_reference(
             "yaw_error_max_deg": max(yaw_errors_deg),
             "linear_velocity_match_count": len(linear_velocity_errors),
             "angular_velocity_match_count": len(angular_velocity_errors),
+            "linear_velocity_coverage": (
+                len(linear_velocity_errors) / len(evaluation_matches)
+            ),
+            "angular_velocity_coverage": (
+                len(angular_velocity_errors) / len(evaluation_matches)
+            ),
         }
     )
     if linear_velocity_errors:
@@ -686,6 +872,18 @@ def score_dynamic_reference(
                 "angular_velocity_error_max_radps": max(angular_velocity_errors),
             }
         )
+    if (
+        metrics["linear_velocity_coverage"]
+        < config.minimum_velocity_coverage
+    ):
+        reasons.append("linear_velocity_coverage_below_minimum")
+    if (
+        metrics["angular_velocity_coverage"]
+        < config.minimum_velocity_coverage
+    ):
+        reasons.append("angular_velocity_coverage_below_minimum")
+    if reasons:
+        return _invalid_report(reasons, metrics=metrics)
 
     waist_position_errors: list[np.ndarray] = []
     waist_yaw_errors: list[float] = []

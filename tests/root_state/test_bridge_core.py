@@ -217,6 +217,22 @@ def test_bridge_emits_strict_packet_with_real_joint_gap_and_correction_metadata(
     assert packet.calibration_digest == b"c" * 32
 
 
+def test_bridge_exposes_the_exact_synchronized_joint_evidence_used_for_fk() -> None:
+    core = _ready_core()
+
+    result = core.build_packet_with_evidence(
+        _observation(),
+        publish_time_ns=1_007_000_000,
+    )
+
+    assert result.packet.strictly_valid
+    assert result.joint_sample.stamp_ns == result.packet.estimate_time_ns
+    assert result.joint_sample.names == CANONICAL_G1_JOINT_NAMES
+    assert result.joint_sample.position[12:15] == pytest.approx(
+        (0.1109090909, 0.1209090909, 0.1309090909)
+    )
+
+
 def test_bridge_estimator_health_fails_independently_without_reusing_good_state() -> None:
     core = _ready_core()
     core.append_joint(_joint(1_095_000_000, 12, -0.1))

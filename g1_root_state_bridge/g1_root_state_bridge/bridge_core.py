@@ -82,6 +82,14 @@ class NormalizedLidarState:
 
 
 @dataclass(frozen=True)
+class BridgeBuildResult:
+    """One root packet plus the exact synchronized joint sample used by FK."""
+
+    packet: RootStatePacketV2
+    joint_sample: TimedJointSample
+
+
+@dataclass(frozen=True)
 class CorrectionSample:
     reference_time_ns: int
     evidence_time_ns: int
@@ -372,6 +380,17 @@ class BridgeCore:
         *,
         publish_time_ns: int,
     ) -> RootStatePacketV2:
+        return self.build_packet_with_evidence(
+            observation,
+            publish_time_ns=publish_time_ns,
+        ).packet
+
+    def build_packet_with_evidence(
+        self,
+        observation: EstimatorObservation,
+        *,
+        publish_time_ns: int,
+    ) -> BridgeBuildResult:
         if not isinstance(publish_time_ns, int) or publish_time_ns < 0:
             raise BridgeCoreError("publish time must be a non-negative integer")
         normalized = self.normalizer.normalize(observation)
@@ -451,19 +470,30 @@ class BridgeCore:
             if correction is None
             else correction.covariance_diagonal
         )
-        return RootStatePacketV2(
-            sequence=self._sequence,
-            source_epoch=self.source_epoch,
-            estimate_time_ns=normalized.estimate_time_ns,
-            publish_time_ns=publish_time_ns,
-            correction_time_ns=correction_time_ns,
-            joint_time_ns=joint_match.representative_time_ns,
-            joint_sync_gap_ns=joint_match.signed_gap_ns,
-            health_flags=health_flags,
-            position=tuple(float(value) for value in world_T_pelvis[:3, 3]),
-            quaternion_wxyz=_quaternion_wxyz(world_T_pelvis[:3, :3]),
-            linear_velocity=tuple(float(value) for value in pelvis_linear),
-            angular_velocity=tuple(float(value) for value in pelvis_angular),
-            covariance_diagonal=covariance,
-            calibration_digest=self.calibration.calibration_digest,
+        return BridgeBuildResult(
+            packet=RootStatePacketV2(
+                sequence=self._sequence,
+                source_epoch=self.source_epoch,
+                estimate_time_ns=normalized.estimate_time_ns,
+                publish_time_ns=publish_time_ns,
+                correction_time_ns=correction_time_ns,
+                joint_time_ns=joint_match.representative_time_ns,
+                joint_sync_gap_ns=joint_match.signed_gap_ns,
+                health_flags=health_flags,
+                position=tuple(
+                    float(value) for value in world_T_pelvis[:3, 3]
+                ),
+                quaternion_wxyz=_quaternion_wxyz(
+                    world_T_pelvis[:3, :3]
+                ),
+                linear_velocity=tuple(
+                    float(value) for value in pelvis_linear
+                ),
+                angular_velocity=tuple(
+                    float(value) for value in pelvis_angular
+                ),
+                covariance_diagonal=covariance,
+                calibration_digest=self.calibration.calibration_digest,
+            ),
+            joint_sample=joint_match.sample,
         )

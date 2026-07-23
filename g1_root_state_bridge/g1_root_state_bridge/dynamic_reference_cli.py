@@ -13,6 +13,7 @@ from g1_root_state_bridge.dynamic_reference_io import (
     load_estimator_status_jsonl,
     load_reference_pose_jsonl,
     load_score_config_json,
+    load_waist_joint_evidence_jsonl,
     report_as_dict,
 )
 
@@ -56,12 +57,16 @@ def main(argv: list[str] | None = None) -> int:
             clock_id=config.target_clock_id,
             frame_id=args.estimator_frame_id,
         )
+        waist_joints = load_waist_joint_evidence_jsonl(
+            args.estimator_jsonl
+        )
         reference = load_reference_pose_jsonl(args.reference_jsonl)
         report = score_dynamic_reference(
             estimator,
             reference,
             config=config,
             clock_mapping=clock_mapping,
+            waist_joint_samples=waist_joints,
         )
     except DynamicReferenceFormatError as exc:
         parser.error(str(exc))
@@ -79,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     payload["sample_counts"] = {
         "estimator": len(estimator),
         "reference": len(reference),
+        "waist_joint": len(waist_joints),
     }
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(
@@ -92,4 +98,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

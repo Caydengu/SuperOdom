@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -9,9 +10,14 @@ from g1_root_state_bridge.dynamic_reference_io import (
     load_estimator_status_jsonl,
     load_reference_pose_jsonl,
     load_score_config_json,
+    load_waist_joint_evidence_jsonl,
     report_as_dict,
 )
 from g1_root_state_bridge.dynamic_reference_cli import main as score_main
+from g1_root_state_bridge.joint_contract import CANONICAL_G1_JOINT_NAMES
+from g1_root_state_bridge.joint_transport import (
+    canonical_joint_mapping_digest,
+)
 from g1_root_state_bridge.protocol import (
     REQUIRED_HEALTH_FLAGS,
     RootStatePacketV2,
@@ -28,6 +34,13 @@ def _write_jsonl(path, records: list[dict[str, object]]) -> None:
 
 
 def _packet(sequence: int, time_ns: int) -> RootStatePacketV2:
+    if sequence <= 3:
+        x, z, yaw = 0.0, 0.8, 0.0
+    elif sequence <= 6:
+        fraction = (sequence - 4) / 2.0
+        x, z, yaw = 0.2 * fraction, 0.8 + 0.08 * fraction, 0.1 * fraction
+    else:
+        x, z, yaw = 0.2, 0.88, 0.1
     return RootStatePacketV2(
         sequence=sequence,
         source_epoch=17,
@@ -37,8 +50,13 @@ def _packet(sequence: int, time_ns: int) -> RootStatePacketV2:
         joint_time_ns=time_ns - 100_000,
         joint_sync_gap_ns=-100_000,
         health_flags=REQUIRED_HEALTH_FLAGS,
-        position=(0.1 * sequence, 0.0, 0.8),
-        quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+        position=(x, 0.0, z),
+        quaternion_wxyz=(
+            math.cos(yaw / 2.0),
+            0.0,
+            0.0,
+            math.sin(yaw / 2.0),
+        ),
         linear_velocity=(0.1, 0.0, 0.0),
         angular_velocity=(0.0, 0.0, 0.0),
         covariance_diagonal=(1.0,) * 6,
@@ -85,6 +103,48 @@ def test_root_state_status_loader_uses_serialized_v2_as_source_of_truth(
     assert samples[0].position != (999.0, 999.0, 999.0)
     assert samples[0].calibration_id == first.calibration_digest.hex()
     assert samples[1].sequence == 2
+
+
+def test_waist_joint_loader_requires_hash_bound_synchronized_joint_evidence(
+    tmp_path,
+) -> None:
+    packet = _packet(7, 1_600_000_000)
+    path = tmp_path / "bridge_status.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "schema": "g1_root_state_bridge_status_v1",
+                "event": "packet_published",
+                "kind": "packet",
+                "strictly_valid": True,
+                "payload_hex": serialize_root_state_v2(packet).hex(),
+                "joint_names": list(CANONICAL_G1_JOINT_NAMES),
+                "joint_position": [0.0] * 12
+                + [0.2, -0.1, 0.15]
+                + [0.0] * 14,
+                "joint_velocity": [0.0] * 29,
+                "joint_mapping_digest_sha256": (
+                    canonical_joint_mapping_digest().hex()
+                ),
+            }
+        ],
+    )
+
+    samples = load_waist_joint_evidence_jsonl(path)
+
+    assert len(samples) == 1
+    assert samples[0].time_ns == packet.estimate_time_ns
+    assert samples[0].position_rad == pytest.approx((0.2, -0.1, 0.15))
+
+    records = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    records[0]["joint_mapping_digest_sha256"] = "0" * 64
+    _write_jsonl(path, records)
+    with pytest.raises(DynamicReferenceFormatError, match="mapping"):
+        load_waist_joint_evidence_jsonl(path)
 
 
 def test_normalized_reference_contract_preserves_identity_and_quality(
@@ -174,11 +234,18 @@ def test_score_config_loads_clock_mapping_and_serializes_report(tmp_path) -> Non
                 "max_interpolation_gap_ns": 20_000_000,
                 "max_clock_mapping_residual_ns": 5_000_000,
                 "minimum_coverage": 0.9,
+                "minimum_velocity_coverage": 0.9,
                 "horizontal_p95_limit_m": 0.05,
                 "vertical_p95_limit_m": 0.03,
                 "yaw_p95_limit_deg": 1.5,
                 "waist_position_residual_limit_m": 0.02,
                 "waist_yaw_residual_limit_deg": 0.5,
+                "minimum_horizontal_excitation_m": 0.10,
+                "minimum_vertical_excitation_m": 0.06,
+                "minimum_yaw_excitation_deg": 3.0,
+                "minimum_waist_joint_excitation_rad": 0.0872664626,
+                "maximum_waist_reference_translation_m": 0.02,
+                "maximum_waist_reference_yaw_deg": 0.5,
                 "clock_mapping": {
                     "source_clock_id": "motive_software_ns",
                     "target_clock_id": "unix_realtime_ns",
@@ -234,6 +301,18 @@ def test_score_cli_writes_hash_bound_pass_report(tmp_path) -> None:
                 "kind": "packet",
                 "strictly_valid": True,
                 "payload_hex": serialize_root_state_v2(packet).hex(),
+                "joint_names": list(CANONICAL_G1_JOINT_NAMES),
+                "joint_position": [0.0] * 12
+                + [
+                    0.1 * max(0, index - 6),
+                    0.0,
+                    0.0,
+                ]
+                + [0.0] * 14,
+                "joint_velocity": [0.0] * 29,
+                "joint_mapping_digest_sha256": (
+                    canonical_joint_mapping_digest().hex()
+                ),
             }
         )
         reference_records.append(
@@ -264,11 +343,18 @@ def test_score_cli_writes_hash_bound_pass_report(tmp_path) -> None:
                 "max_interpolation_gap_ns": 150_000_000,
                 "max_clock_mapping_residual_ns": 5_000_000,
                 "minimum_coverage": 1.0,
+                "minimum_velocity_coverage": 1.0,
                 "horizontal_p95_limit_m": 0.05,
                 "vertical_p95_limit_m": 0.03,
                 "yaw_p95_limit_deg": 1.5,
                 "waist_position_residual_limit_m": 0.02,
                 "waist_yaw_residual_limit_deg": 0.5,
+                "minimum_horizontal_excitation_m": 0.10,
+                "minimum_vertical_excitation_m": 0.06,
+                "minimum_yaw_excitation_deg": 3.0,
+                "minimum_waist_joint_excitation_rad": 0.0872664626,
+                "maximum_waist_reference_translation_m": 0.02,
+                "maximum_waist_reference_yaw_deg": 0.5,
             }
         ),
         encoding="utf-8",
@@ -291,5 +377,9 @@ def test_score_cli_writes_hash_bound_pass_report(tmp_path) -> None:
     result = json.loads(output_path.read_text(encoding="utf-8"))
     assert result["valid"] is True
     assert result["gates_pass"] is True
-    assert result["sample_counts"] == {"estimator": 9, "reference": 9}
+    assert result["sample_counts"] == {
+        "estimator": 9,
+        "reference": 9,
+        "waist_joint": 9,
+    }
     assert len(result["inputs"]["estimator_sha256"]) == 64

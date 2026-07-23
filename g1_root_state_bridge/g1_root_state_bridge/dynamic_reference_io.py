@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -11,6 +12,11 @@ from g1_root_state_bridge.dynamic_reference import (
     DynamicReferenceConfig,
     DynamicReferenceReport,
     PoseSample,
+    WaistJointSample,
+)
+from g1_root_state_bridge.joint_contract import CANONICAL_G1_JOINT_NAMES
+from g1_root_state_bridge.joint_transport import (
+    canonical_joint_mapping_digest,
 )
 from g1_root_state_bridge.protocol import (
     RootStateProtocolError,
@@ -96,6 +102,84 @@ def load_estimator_status_jsonl(
     if not samples:
         raise DynamicReferenceFormatError(
             f"{path}: no serialized V2 packet records found"
+        )
+    return samples
+
+
+def load_waist_joint_evidence_jsonl(path: Path) -> list[WaistJointSample]:
+    """Load the synchronized joints used by FK from each bridge packet record."""
+
+    samples: list[WaistJointSample] = []
+    expected_names = list(CANONICAL_G1_JOINT_NAMES)
+    expected_mapping = canonical_joint_mapping_digest().hex()
+    for record_number, record in enumerate(_read_jsonl(path), start=1):
+        if record.get("kind") != "packet":
+            continue
+        payload_hex = record.get("payload_hex")
+        if not isinstance(payload_hex, str):
+            raise DynamicReferenceFormatError(
+                f"{path}: record {record_number}: packet lacks payload_hex"
+            )
+        try:
+            packet = deserialize_root_state_v2(bytes.fromhex(payload_hex))
+        except (ValueError, RootStateProtocolError) as exc:
+            raise DynamicReferenceFormatError(
+                f"{path}: record {record_number}: invalid V2 payload"
+            ) from exc
+
+        if record.get("joint_mapping_digest_sha256") != expected_mapping:
+            raise DynamicReferenceFormatError(
+                f"{path}: record {record_number}: joint mapping is not the "
+                "canonical G1 contract"
+            )
+        if record.get("joint_names") != expected_names:
+            raise DynamicReferenceFormatError(
+                f"{path}: record {record_number}: joint names are not in "
+                "canonical G1 order"
+            )
+        raw_position = record.get("joint_position")
+        raw_velocity = record.get("joint_velocity")
+        if (
+            not isinstance(raw_position, list)
+            or len(raw_position) != len(CANONICAL_G1_JOINT_NAMES)
+            or not isinstance(raw_velocity, list)
+            or len(raw_velocity) != len(CANONICAL_G1_JOINT_NAMES)
+        ):
+            raise DynamicReferenceFormatError(
+                f"{path}: record {record_number}: synchronized joint evidence "
+                "must contain 29 positions and velocities"
+            )
+        try:
+            position = tuple(float(value) for value in raw_position)
+            velocity = tuple(float(value) for value in raw_velocity)
+        except (TypeError, ValueError) as exc:
+            raise DynamicReferenceFormatError(
+                f"{path}: record {record_number}: joint evidence is malformed"
+            ) from exc
+        if not all(math.isfinite(value) for value in (*position, *velocity)):
+            raise DynamicReferenceFormatError(
+                f"{path}: record {record_number}: joint evidence must be finite"
+            )
+        record_valid = record.get("strictly_valid", packet.strictly_valid)
+        if not isinstance(record_valid, bool):
+            raise DynamicReferenceFormatError(
+                f"{path}: record {record_number}: strictly_valid must be bool"
+            )
+        samples.append(
+            WaistJointSample(
+                sequence=packet.sequence,
+                time_ns=packet.estimate_time_ns,
+                position_rad=(
+                    position[12],
+                    position[13],
+                    position[14],
+                ),
+                valid=packet.strictly_valid and record_valid,
+            )
+        )
+    if not samples:
+        raise DynamicReferenceFormatError(
+            f"{path}: no synchronized waist-joint packet evidence found"
         )
     return samples
 
@@ -251,11 +335,18 @@ def load_score_config_json(
         "max_interpolation_gap_ns",
         "max_clock_mapping_residual_ns",
         "minimum_coverage",
+        "minimum_velocity_coverage",
         "horizontal_p95_limit_m",
         "vertical_p95_limit_m",
         "yaw_p95_limit_deg",
         "waist_position_residual_limit_m",
         "waist_yaw_residual_limit_deg",
+        "minimum_horizontal_excitation_m",
+        "minimum_vertical_excitation_m",
+        "minimum_yaw_excitation_deg",
+        "minimum_waist_joint_excitation_rad",
+        "maximum_waist_reference_translation_m",
+        "maximum_waist_reference_yaw_deg",
     )
     try:
         config_values = {field: payload[field] for field in config_fields}

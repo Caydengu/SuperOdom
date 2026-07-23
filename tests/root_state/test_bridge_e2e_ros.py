@@ -236,6 +236,19 @@ def test_typed_ros_and_udp_inputs_produce_one_strict_zmq_v2_packet(
         packet_records = [record for record in records if record.get("kind") == "packet"]
         assert len(packet_records) == 1
         assert bytes.fromhex(packet_records[0]["payload_hex"]) == payloads[0]
+        assert packet_records[0]["joint_names"] == list(
+            CANONICAL_G1_JOINT_NAMES
+        )
+        assert packet_records[0]["joint_position"] == pytest.approx(
+            [0.0] * len(CANONICAL_G1_JOINT_NAMES)
+        )
+        assert packet_records[0]["joint_velocity"] == pytest.approx(
+            [0.0] * len(CANONICAL_G1_JOINT_NAMES)
+        )
+        assert (
+            packet_records[0]["joint_mapping_digest_sha256"]
+            == canonical_joint_mapping_digest().hex()
+        )
     finally:
         joint_sender.close()
         subscriber.close(linger=0)

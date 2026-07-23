@@ -8,6 +8,7 @@ from g1_root_state_bridge.dynamic_reference import (
     ClockMapping,
     DynamicReferenceConfig,
     PoseSample,
+    WaistJointSample,
     score_dynamic_reference,
 )
 
@@ -36,16 +37,19 @@ def _trajectory(
         time_s = index * 0.1
         if time_s <= 1.0:
             x = 0.0
+            z = 0.8
             yaw = 0.0
             vx = 0.0
             wz = 0.0
         elif time_s <= 3.0:
             x = 0.1 * (time_s - 1.0)
+            z = 0.8 + 0.04 * (time_s - 1.0)
             yaw = 0.05 * (time_s - 1.0)
             vx = 0.1
             wz = 0.05
         else:
             x = 0.2
+            z = 0.88
             yaw = 0.1
             vx = 0.0
             wz = 0.0
@@ -56,7 +60,7 @@ def _trajectory(
                 clock_id=clock_id,
                 frame_id=frame_id,
                 calibration_id=calibration_id,
-                position=(x, 0.0, 0.8),
+                position=(x, 0.0, z),
                 quaternion_wxyz=_yaw_quaternion(yaw),
                 linear_velocity=(vx, 0.0, 0.0),
                 angular_velocity=(0.0, 0.0, wz),
@@ -70,26 +74,63 @@ def _config(**changes: object) -> DynamicReferenceConfig:
         "target_clock_id": "oslo_monotonic",
         "reference_calibration_id": "reference-calibration-v1",
         "calibration_interval_ns": (0, NS),
-        "evaluation_interval_ns": (NS, 3 * NS),
+        "evaluation_interval_ns": (NS + 1, 3 * NS),
         "waist_interval_ns": (4 * NS, 6 * NS),
         "max_interpolation_gap_ns": 150_000_000,
         "max_clock_mapping_residual_ns": 5_000_000,
         "minimum_coverage": 0.9,
+        "minimum_velocity_coverage": 0.9,
         "horizontal_p95_limit_m": 0.05,
         "vertical_p95_limit_m": 0.03,
         "yaw_p95_limit_deg": 1.5,
         "waist_position_residual_limit_m": 0.02,
         "waist_yaw_residual_limit_deg": 0.5,
+        "minimum_horizontal_excitation_m": 0.10,
+        "minimum_vertical_excitation_m": 0.06,
+        "minimum_yaw_excitation_deg": 3.0,
+        "minimum_waist_joint_excitation_rad": math.radians(5.0),
+        "maximum_waist_reference_translation_m": 0.02,
+        "maximum_waist_reference_yaw_deg": 0.5,
     }
     values.update(changes)
     return DynamicReferenceConfig(**values)
+
+
+def _waist_joint_evidence(
+    *,
+    moved: bool = True,
+) -> list[WaistJointSample]:
+    samples: list[WaistJointSample] = []
+    for index in range(61):
+        time_ns = index * NS // 10
+        fraction = 0.0
+        if moved and time_ns >= 4 * NS:
+            fraction = min(1.0, (time_ns - 4 * NS) / NS)
+        samples.append(
+            WaistJointSample(
+                sequence=index,
+                time_ns=time_ns,
+                position_rad=(
+                    math.radians(10.0) * fraction,
+                    math.radians(-6.0) * fraction,
+                    math.radians(8.0) * fraction,
+                ),
+                valid=True,
+            )
+        )
+    return samples
 
 
 def test_aligned_identity_trajectory_passes_all_frozen_gates() -> None:
     reference = _trajectory(frame_id="mocap_world")
     estimator = _trajectory(frame_id="superodom_world")
 
-    report = score_dynamic_reference(estimator, reference, config=_config())
+    report = score_dynamic_reference(
+        estimator,
+        reference,
+        config=_config(),
+        waist_joint_samples=_waist_joint_evidence(),
+    )
 
     assert report.valid is True
     assert report.gates_pass is True
@@ -101,6 +142,67 @@ def test_aligned_identity_trajectory_passes_all_frozen_gates() -> None:
     assert report.metrics["waist_position_residual_max_m"] < 1e-9
     assert report.metrics["waist_yaw_residual_max_deg"] < 1e-9
     assert report.metrics["linear_velocity_error_p95_mps"] < 1e-9
+
+
+def test_overlapping_evidence_intervals_are_rejected() -> None:
+    with pytest.raises(ValueError, match="disjoint"):
+        _config(
+            calibration_interval_ns=(0, 2 * NS),
+            evaluation_interval_ns=(NS, 3 * NS),
+        )
+
+
+def test_unexcited_motion_and_waist_intervals_fail_closed() -> None:
+    stationary = [
+        PoseSample(
+            **{
+                **sample.as_dict(),
+                "position": (0.0, 0.0, 0.8),
+                "quaternion_wxyz": _yaw_quaternion(0.0),
+            }
+        )
+        for sample in _trajectory()
+    ]
+
+    report = score_dynamic_reference(
+        stationary,
+        stationary,
+        config=_config(),
+        waist_joint_samples=_waist_joint_evidence(moved=False),
+    )
+
+    assert report.valid is False
+    assert report.gates_pass is False
+    assert "horizontal_excitation_below_minimum" in report.invalid_reasons
+    assert "vertical_excitation_below_minimum" in report.invalid_reasons
+    assert "yaw_excitation_below_minimum" in report.invalid_reasons
+    assert "waist_joint_excitation_below_minimum" in report.invalid_reasons
+
+
+def test_missing_dynamic_velocity_truth_fails_closed() -> None:
+    reference = [
+        PoseSample(
+            **{
+                **sample.as_dict(),
+                "linear_velocity": None,
+                "angular_velocity": None,
+            }
+        )
+        for sample in _trajectory()
+    ]
+
+    report = score_dynamic_reference(
+        _trajectory(),
+        reference,
+        config=_config(),
+        waist_joint_samples=_waist_joint_evidence(),
+    )
+
+    assert report.valid is False
+    assert "linear_velocity_coverage_below_minimum" in report.invalid_reasons
+    assert "angular_velocity_coverage_below_minimum" in report.invalid_reasons
+    assert report.metrics["linear_velocity_coverage"] == 0.0
+    assert report.metrics["angular_velocity_coverage"] == 0.0
 
 
 def test_stationary_alignment_removes_only_a_fixed_rigid_world_transform() -> None:
@@ -129,7 +231,12 @@ def test_stationary_alignment_removes_only_a_fixed_rigid_world_transform() -> No
             )
         )
 
-    report = score_dynamic_reference(estimator, reference, config=_config())
+    report = score_dynamic_reference(
+        estimator,
+        reference,
+        config=_config(),
+        waist_joint_samples=_waist_joint_evidence(),
+    )
 
     assert report.valid is True
     assert report.gates_pass is True
@@ -155,7 +262,12 @@ def test_six_centimeter_dynamic_horizontal_error_fails_pose_gate() -> None:
             )
         )
 
-    report = score_dynamic_reference(estimator, reference, config=_config())
+    report = score_dynamic_reference(
+        estimator,
+        reference,
+        config=_config(),
+        waist_joint_samples=_waist_joint_evidence(),
+    )
 
     assert report.valid is True
     assert report.gates_pass is False
@@ -170,7 +282,12 @@ def test_different_clock_requires_a_validated_affine_mapping() -> None:
     )
     estimator = _trajectory()
 
-    missing = score_dynamic_reference(estimator, reference, config=_config())
+    missing = score_dynamic_reference(
+        estimator,
+        reference,
+        config=_config(),
+        waist_joint_samples=_waist_joint_evidence(),
+    )
     assert missing.valid is False
     assert "clock_mapping_required" in missing.invalid_reasons
 
@@ -187,6 +304,7 @@ def test_different_clock_requires_a_validated_affine_mapping() -> None:
         reference,
         config=_config(),
         clock_mapping=mapping,
+        waist_joint_samples=_waist_joint_evidence(),
     )
     assert mapped.valid is True
     assert mapped.gates_pass is True
@@ -211,6 +329,7 @@ def test_excessive_clock_fit_residual_invalidates_evidence() -> None:
         reference,
         config=_config(),
         clock_mapping=mapping,
+        waist_joint_samples=_waist_joint_evidence(),
     )
 
     assert report.valid is False
@@ -221,14 +340,20 @@ def test_nonmonotonic_time_and_unknown_calibration_fail_closed() -> None:
     reference = _trajectory()
     reference[20], reference[21] = reference[21], reference[20]
     nonmonotonic = score_dynamic_reference(
-        _trajectory(), reference, config=_config()
+        _trajectory(),
+        reference,
+        config=_config(),
+        waist_joint_samples=_waist_joint_evidence(),
     )
     assert nonmonotonic.valid is False
     assert "reference_time_not_strictly_increasing" in nonmonotonic.invalid_reasons
 
     wrong_calibration = _trajectory(calibration_id="unknown")
     unknown = score_dynamic_reference(
-        _trajectory(), wrong_calibration, config=_config()
+        _trajectory(),
+        wrong_calibration,
+        config=_config(),
+        waist_joint_samples=_waist_joint_evidence(),
     )
     assert unknown.valid is False
     assert "reference_calibration_not_allowed" in unknown.invalid_reasons
@@ -241,7 +366,12 @@ def test_tracking_loss_and_large_gaps_reduce_coverage_and_invalidate_trace() -> 
         for sample in reference
     ]
 
-    report = score_dynamic_reference(_trajectory(), reference, config=_config())
+    report = score_dynamic_reference(
+        _trajectory(),
+        reference,
+        config=_config(),
+        waist_joint_samples=_waist_joint_evidence(),
+    )
 
     assert report.valid is False
     assert "evaluation_coverage_below_minimum" in report.invalid_reasons
@@ -268,7 +398,12 @@ def test_waist_only_three_centimeter_residual_fails_invariance_gate() -> None:
             )
         )
 
-    report = score_dynamic_reference(estimator, reference, config=_config())
+    report = score_dynamic_reference(
+        estimator,
+        reference,
+        config=_config(),
+        waist_joint_samples=_waist_joint_evidence(),
+    )
 
     assert report.valid is True
     assert report.gates_pass is False
@@ -276,4 +411,3 @@ def test_waist_only_three_centimeter_residual_fails_invariance_gate() -> None:
     assert report.gate_results["waist_yaw_residual"] is False
     assert report.metrics["waist_position_residual_max_m"] == pytest.approx(0.03)
     assert report.metrics["waist_yaw_residual_max_deg"] == pytest.approx(0.8)
-

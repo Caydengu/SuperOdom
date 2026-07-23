@@ -17,9 +17,16 @@
   "max_interpolation_gap_ns": 25000000,
   "max_clock_mapping_residual_ns": 5000000,
   "minimum_coverage": 0.9,
+  "minimum_velocity_coverage": 0.9,
   "horizontal_p95_limit_m": 0.05,
   "vertical_p95_limit_m": 0.03,
   "yaw_p95_limit_deg": 1.5,
   "waist_position_residual_limit_m": 0.02,
-  "waist_yaw_residual_limit_deg": 0.5
+  "waist_yaw_residual_limit_deg": 0.5,
+  "minimum_horizontal_excitation_m": 0.10,
+  "minimum_vertical_excitation_m": 0.06,
+  "minimum_yaw_excitation_deg": 3.0,
+  "minimum_waist_joint_excitation_rad": 0.0872664626,
+  "maximum_waist_reference_translation_m": 0.02,
+  "maximum_waist_reference_yaw_deg": 0.5
 }

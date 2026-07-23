@@ -44,6 +44,7 @@ from g1_root_state_bridge.joint_transport import (
     JointPacketError,
     canonical_joint_mapping_digest,
 )
+from g1_root_state_bridge.joint_contract import TimedJointSample
 from g1_root_state_bridge.kinematics import PelvisKinematics
 from g1_root_state_bridge.protocol import (
     RootStatePacketV2,
@@ -457,7 +458,10 @@ class G1RootStateBridgeNode(Node):
                 )
                 continue
             try:
-                packet = self._core.build_packet(observation, publish_time_ns=now_ns)
+                result = self._core.build_packet_with_evidence(
+                    observation,
+                    publish_time_ns=now_ns,
+                )
             except BridgeCoreError as error:
                 if "joint synchronization failed" in str(error):
                     if now_ns - observation.receipt_time_ns <= self._pending_timeout_ns:
@@ -477,9 +481,13 @@ class G1RootStateBridgeNode(Node):
                 )
                 continue
             self._pending.popleft()
-            self._publish_packet(packet)
+            self._publish_packet(result.packet, result.joint_sample)
 
-    def _publish_packet(self, packet: RootStatePacketV2) -> None:
+    def _publish_packet(
+        self,
+        packet: RootStatePacketV2,
+        joint_sample: TimedJointSample,
+    ) -> None:
         payload = serialize_root_state_v2(packet)
         try:
             self._zmq_socket.send(payload, flags=self._zmq.NOBLOCK)
@@ -525,6 +533,12 @@ class G1RootStateBridgeNode(Node):
             correction_time_ns=packet.correction_time_ns,
             joint_time_ns=packet.joint_time_ns,
             joint_sync_gap_ns=packet.joint_sync_gap_ns,
+            joint_names=joint_sample.names,
+            joint_position=joint_sample.position,
+            joint_velocity=joint_sample.velocity,
+            joint_mapping_digest_sha256=(
+                canonical_joint_mapping_digest().hex()
+            ),
             health_flags=int(packet.health_flags),
             strictly_valid=packet.strictly_valid,
             position=packet.position,
