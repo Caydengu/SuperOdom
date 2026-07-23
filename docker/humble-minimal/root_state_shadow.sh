@@ -77,8 +77,8 @@ done
   echo "Trial name must use letters, digits, underscores, periods, or dashes" >&2
   exit 2
 }
-[[ "$duration_sec" =~ ^[0-9]+$ ]] && (( 10#$duration_sec >= 10 && 10#$duration_sec <= 900 )) || {
-  echo "Duration must be an integer from 10 through 900 seconds" >&2
+[[ "$duration_sec" =~ ^[0-9]+$ ]] && (( 10#$duration_sec >= 10 && 10#$duration_sec <= 3600 )) || {
+  echo "Duration must be an integer from 10 through 3600 seconds" >&2
   exit 2
 }
 

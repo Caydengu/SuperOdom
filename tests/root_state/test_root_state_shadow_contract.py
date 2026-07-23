@@ -17,6 +17,7 @@ def test_root_state_shadow_is_syntax_valid_and_uses_an_explicit_image():
     assert "--image" in source
     assert "SUPERODOM_IMAGE" in source
     assert "superodom-root-state-shadow" in source
+    assert "duration_sec <= 3600" in source
 
 
 def test_root_state_shadow_launches_bridge_and_records_only_compact_topics():
