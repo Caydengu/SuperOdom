@@ -163,6 +163,13 @@ subscription_count() {
     | head -n 1
 }
 
+publisher_count() {
+  local topic=$1
+  ros2 topic info "$topic" --verbose \
+    | sed -n "s/^Publisher count: \\([0-9][0-9]*\\)$/\\1/p" \
+    | head -n 1
+}
+
 wait_for_type /livox/lidar livox_ros_driver2/msg/CustomMsg 45
 wait_for_type /livox/imu sensor_msgs/msg/Imu 45
 ros2 topic info /livox/lidar --verbose > /output/logs/lidar_info_before.txt
@@ -170,6 +177,11 @@ pre_subscribers="$(subscription_count /livox/lidar)"
 [[ "$pre_subscribers" == "0" ]] || {
   echo "Expected zero pre-existing /livox/lidar subscribers, found $pre_subscribers" >&2
   exit 33
+}
+pre_publishers="$(publisher_count /livox/lidar)"
+[[ "$pre_publishers" == "1" ]] || {
+  echo "Expected exactly one /livox/lidar publisher, found $pre_publishers" >&2
+  exit 42
 }
 
 live_config=/opt/superodom_ws/install/share/super_odometry/config/livox_mid360.yaml
@@ -233,6 +245,11 @@ active_subscribers="$(subscription_count /livox/lidar)"
 [[ "$active_subscribers" == "1" ]] || {
   echo "Expected one active /livox/lidar subscriber, found $active_subscribers" >&2
   exit 38
+}
+active_publishers="$(publisher_count /livox/lidar)"
+[[ "$active_publishers" == "1" ]] || {
+  echo "Expected exactly one active /livox/lidar publisher, found $active_publishers" >&2
+  exit 43
 }
 ros2 topic info /pelvis_state_estimation --verbose > /output/logs/pelvis_info_active.txt
 ros2 topic list -t > /output/logs/topic_list_active.txt

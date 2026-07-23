@@ -36,6 +36,11 @@ def test_root_state_shadow_launches_bridge_and_records_only_compact_topics():
     assert "setsid ros2 launch super_odometry" in source
     assert "setsid ros2 run g1_root_state_bridge" in source
     assert 'kill -INT -- "-$pid"' in source
+    assert "publisher_count()" in source
+    assert 'pre_publishers="$(publisher_count /livox/lidar)"' in source
+    assert '[[ "$pre_publishers" == "1" ]]' in source
+    assert 'active_publishers="$(publisher_count /livox/lidar)"' in source
+    assert '[[ "$active_publishers" == "1" ]]' in source
 
     record_block = source.split("record_topics=(", maxsplit=1)[1].split(")", maxsplit=1)[0]
     assert "/livox/lidar" not in record_block
