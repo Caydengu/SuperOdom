@@ -3,6 +3,11 @@
 Version 2 is deliberately a fixed-size, little-endian packet so the Humble
 producer and non-ROS Holosoma consumer can validate the same bytes without
 sharing generated ROS types.
+
+``correction_time_ns`` is the newest physical LiDAR-return time incorporated
+by the latest state-estimator-confirmed correction.  It is deliberately not
+the scan-start pose-reference time or the host application time; those remain
+explicit on the ROS-side correction contract.
 """
 
 from __future__ import annotations

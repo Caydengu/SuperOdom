@@ -37,6 +37,7 @@
 #include "super_odometry/utils/Twist.h"
 #include "super_odometry/container/MapRingBuffer.h"
 #include <super_odometry_msgs/msg/laser_feature.hpp>
+#include <super_odometry_msgs/msg/lidar_correction.hpp>
 #include "super_odometry/config/parameter.h"
 #include <std_msgs/msg/string.hpp>
 #include "super_odometry/utils/superodom_utils.h"
@@ -85,6 +86,7 @@ namespace super_odometry {
         bool nio_prediction_status;
         bool imu_orientation_status;
         double timestamp;
+        double newest_observation_timestamp;
     };
 
     SensorData sensorMeas;
@@ -203,6 +205,8 @@ namespace super_odometry {
         rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMappedHighFrec;
         rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubLaserAfterMappedPath;
         rclcpp::Publisher<super_odometry_msgs::msg::OptimizationStats>::SharedPtr pubOptimizationStats;
+        rclcpp::Publisher<super_odometry_msgs::msg::LidarCorrection>::SharedPtr
+            pubLidarCorrection;
         rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubLaserOdometryIncremental;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubPreviousCloud;
         rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubPreviousPose;
@@ -229,6 +233,8 @@ namespace super_odometry {
         double timeLaserCloudFullRes = 0;
         double timeLaserOdometry = 0;
         double timeLaserOdometryPrev = 0;
+        double timeNewestLidarObservation = 0;
+        std::uint64_t lidarCorrectionSequence = 0;
 
 
         bool got_previous_map = false;
@@ -252,6 +258,7 @@ namespace super_odometry {
         std::queue<sensor_msgs::msg::PointCloud2> surfLastBuf;
         std::queue<sensor_msgs::msg::PointCloud2> realsenseBuf;
         std::queue<sensor_msgs::msg::PointCloud2> fullResBuf;
+        std::queue<double> newestObservationTimeBuf;
         std::queue<sensor_msgs::msg::PointCloud2> rawWithFeaturesBuf;
         std::queue<sensor_msgs::msg::PointCloud2::SharedPtr> rawDataBuf;
         std::queue<nav_msgs::msg::Odometry::SharedPtr> odometryBuf;

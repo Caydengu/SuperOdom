@@ -1,6 +1,10 @@
 # feature Info
 std_msgs/Header header 
 
+# Newest physical LiDAR-return time represented by this scan.  The header
+# remains the scan-start/deskew reference time for backwards compatibility.
+builtin_interfaces/Time newest_observation_stamp
+
 int64 sensor
 
 int64 imu_available

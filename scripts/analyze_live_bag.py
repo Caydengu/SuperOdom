@@ -265,6 +265,71 @@ def optimization_stats_metrics(
     return result
 
 
+def correction_timing_metrics(
+    *,
+    reference_ns: Sequence[int],
+    evidence_ns: Sequence[int],
+    mapping_output_ns: Sequence[int],
+    application_ns: Sequence[int],
+    receipt_ns: Sequence[int],
+    sequences: Sequence[int],
+    reset_ids: Sequence[int],
+    valid: Sequence[bool],
+) -> dict[str, Any]:
+    lengths = {
+        len(reference_ns),
+        len(evidence_ns),
+        len(mapping_output_ns),
+        len(application_ns),
+        len(receipt_ns),
+        len(sequences),
+        len(reset_ids),
+        len(valid),
+    }
+    if len(lengths) != 1:
+        raise ValueError("correction timing counts differ")
+    timing_order_violations = sum(
+        not reference <= evidence <= output <= application <= receipt
+        for reference, evidence, output, application, receipt in zip(
+            reference_ns,
+            evidence_ns,
+            mapping_output_ns,
+            application_ns,
+            receipt_ns,
+        )
+    )
+    return {
+        "count": len(reference_ns),
+        "valid_count": sum(bool(value) for value in valid),
+        "invalid_count": sum(not bool(value) for value in valid),
+        "timing_order_violation_count": timing_order_violations,
+        "reference_nonmonotonic_count": _nonmonotonic_count(reference_ns),
+        "evidence_nonmonotonic_count": _nonmonotonic_count(evidence_ns),
+        "sequence_nonmonotonic_count": _nonmonotonic_count(sequences),
+        "reset_ids": sorted(set(int(value) for value in reset_ids)),
+        "scan_duration_ms": distribution(
+            (evidence - reference) / 1e6
+            for reference, evidence in zip(reference_ns, evidence_ns)
+        ),
+        "mapping_delay_from_newest_observation_ms": distribution(
+            (output - evidence) / 1e6
+            for evidence, output in zip(evidence_ns, mapping_output_ns)
+        ),
+        "estimator_application_delay_ms": distribution(
+            (application - output) / 1e6
+            for output, application in zip(mapping_output_ns, application_ns)
+        ),
+        "bridge_transport_delay_ms": distribution(
+            (receipt - application) / 1e6
+            for application, receipt in zip(application_ns, receipt_ns)
+        ),
+        "evidence_age_at_bridge_receipt_ms": distribution(
+            (receipt - evidence) / 1e6
+            for evidence, receipt in zip(evidence_ns, receipt_ns)
+        ),
+    }
+
+
 def timestamp_correspondence(source_ns: Sequence[int], output_ns: Sequence[int]) -> dict[str, Any]:
     source = set(source_ns)
     output = set(output_ns)
@@ -315,6 +380,19 @@ def analyze_bag(bag_path: Path, launch_wall_ns: int | None = None) -> dict[str, 
     laser_odom_receipt: list[int] = []
     laser_positions: list[tuple[float, float, float]] = []
     laser_quaternions: list[tuple[float, float, float, float]] = []
+    lidar_correction_reference: list[int] = []
+    lidar_correction_evidence: list[int] = []
+    lidar_correction_output: list[int] = []
+    lidar_correction_receipt: list[int] = []
+    lidar_correction_sequence: list[int] = []
+    state_correction_reference: list[int] = []
+    state_correction_evidence: list[int] = []
+    state_correction_mapping_output: list[int] = []
+    state_correction_application: list[int] = []
+    state_correction_receipt: list[int] = []
+    state_correction_sequence: list[int] = []
+    state_correction_reset_id: list[int] = []
+    state_correction_valid: list[bool] = []
     stats_header: list[int] = []
     stats_receipt: list[int] = []
     stats_optimization_ms: list[float] = []
@@ -377,6 +455,27 @@ def analyze_bag(bag_path: Path, launch_wall_ns: int | None = None) -> dict[str, 
             orientation = message.pose.pose.orientation
             laser_positions.append((position.x, position.y, position.z))
             laser_quaternions.append((orientation.x, orientation.y, orientation.z, orientation.w))
+        elif topic == "/lidar_correction":
+            lidar_correction_reference.append(_stamp_ns(message.odometry.header.stamp))
+            lidar_correction_evidence.append(
+                _stamp_ns(message.newest_observation_stamp)
+            )
+            lidar_correction_output.append(_stamp_ns(message.output_stamp))
+            lidar_correction_receipt.append(int(receipt_ns))
+            lidar_correction_sequence.append(int(message.sequence))
+        elif topic == "/state_estimation_correction":
+            state_correction_reference.append(_stamp_ns(message.header.stamp))
+            state_correction_evidence.append(
+                _stamp_ns(message.newest_observation_stamp)
+            )
+            state_correction_mapping_output.append(
+                _stamp_ns(message.mapping_output_stamp)
+            )
+            state_correction_application.append(_stamp_ns(message.application_stamp))
+            state_correction_receipt.append(int(receipt_ns))
+            state_correction_sequence.append(int(message.sequence))
+            state_correction_reset_id.append(int(message.reset_id))
+            state_correction_valid.append(bool(message.valid))
         elif topic == "/super_odometry_stats":
             stats_header.append(_stamp_ns(message.header.stamp))
             stats_receipt.append(int(receipt_ns))
@@ -397,6 +496,40 @@ def analyze_bag(bag_path: Path, launch_wall_ns: int | None = None) -> dict[str, 
         "lidar": series_metrics(lidar_header, lidar_receipt) if lidar_header else None,
         "state_estimation": series_metrics(odom_header, odom_receipt) if odom_header else None,
         "laser_odometry": series_metrics(laser_odom_header, laser_odom_receipt) if laser_odom_header else None,
+        "lidar_correction": {
+            **series_metrics(lidar_correction_reference, lidar_correction_receipt),
+            "sequence_nonmonotonic_count": _nonmonotonic_count(
+                lidar_correction_sequence
+            ),
+            "scan_duration_ms": distribution(
+                (evidence - reference) / 1e6
+                for reference, evidence in zip(
+                    lidar_correction_reference, lidar_correction_evidence
+                )
+            ),
+            "mapping_delay_from_newest_observation_ms": distribution(
+                (output - evidence) / 1e6
+                for evidence, output in zip(
+                    lidar_correction_evidence, lidar_correction_output
+                )
+            ),
+            "output_transport_delay_ms": distribution(
+                (receipt - output) / 1e6
+                for output, receipt in zip(
+                    lidar_correction_output, lidar_correction_receipt
+                )
+            ),
+        } if lidar_correction_reference else None,
+        "state_estimation_correction": correction_timing_metrics(
+            reference_ns=state_correction_reference,
+            evidence_ns=state_correction_evidence,
+            mapping_output_ns=state_correction_mapping_output,
+            application_ns=state_correction_application,
+            receipt_ns=state_correction_receipt,
+            sequences=state_correction_sequence,
+            reset_ids=state_correction_reset_id,
+            valid=state_correction_valid,
+        ) if state_correction_reference else None,
         "super_odometry_stats": optimization_stats_metrics(
             stats_header,
             stats_receipt,

@@ -139,8 +139,12 @@ def _ready_core(
     core.append_joint(_joint(1_006_000_000, 11, 0.1))
     core.update_correction(
         CorrectionSample(
-            stamp_ns=900_000_000,
+            reference_time_ns=850_000_000,
+            evidence_time_ns=900_000_000,
+            application_time_ns=900_500_000,
             receipt_time_ns=901_000_000,
+            sequence=3,
+            reset_id=1,
             covariance_diagonal=(0.01, 0.02, 0.03, 0.04, 0.05, 0.06),
         )
     )
@@ -249,8 +253,12 @@ def test_bridge_reset_changes_epoch_and_restarts_sequence() -> None:
     core.append_joint(_joint(1_006_000_000, 2, 0.1))
     core.update_correction(
         CorrectionSample(
-            stamp_ns=900_000_000,
+            reference_time_ns=850_000_000,
+            evidence_time_ns=900_000_000,
+            application_time_ns=900_500_000,
             receipt_time_ns=901_000_000,
+            sequence=1,
+            reset_id=1,
             covariance_diagonal=(0.1,) * 6,
         )
     )
@@ -260,6 +268,48 @@ def test_bridge_reset_changes_epoch_and_restarts_sequence() -> None:
     assert (first.sequence, second.sequence) == (1, 2)
     assert restarted.source_epoch == 18
     assert restarted.sequence == 1
+
+
+def test_bridge_uses_newest_lidar_evidence_not_scan_start_for_freshness() -> None:
+    core = _ready_core()
+    core._corrections.clear()
+    core.update_correction(
+        CorrectionSample(
+            reference_time_ns=800_000_000,
+            evidence_time_ns=900_000_000,
+            application_time_ns=900_500_000,
+            receipt_time_ns=901_000_000,
+            sequence=8,
+            reset_id=1,
+            covariance_diagonal=(0.1,) * 6,
+        )
+    )
+
+    packet = core.build_packet(_observation(), publish_time_ns=1_007_000_000)
+
+    assert packet.correction_time_ns == 900_000_000
+    assert packet.health_flags & RootStateHealth.CORRECTION_FRESH
+
+
+def test_bridge_does_not_attribute_a_correction_to_preapplication_state() -> None:
+    core = _ready_core()
+    core._corrections.clear()
+    core.update_correction(
+        CorrectionSample(
+            reference_time_ns=800_000_000,
+            evidence_time_ns=900_000_000,
+            application_time_ns=1_002_000_000,
+            receipt_time_ns=1_003_000_000,
+            sequence=8,
+            reset_id=1,
+            covariance_diagonal=(0.1,) * 6,
+        )
+    )
+
+    packet = core.build_packet(_observation(), publish_time_ns=1_007_000_000)
+
+    assert packet.correction_time_ns == 0
+    assert not (packet.health_flags & RootStateHealth.CORRECTION_FRESH)
 
 
 def test_bridge_refuses_missing_joint_bracket_instead_of_reusing_previous_root() -> None:

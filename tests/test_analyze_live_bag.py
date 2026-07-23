@@ -104,3 +104,26 @@ def test_optimization_stats_metrics_preserve_cadence_and_processing_cost() -> No
     assert math.isclose(result["header_rate_hz"], 10.0)
     assert math.isclose(result["optimization_ms"]["p95"], 11.8)
     assert math.isclose(result["frame_processing_ms"]["maximum"], 15.0)
+
+
+def test_correction_timing_metrics_keep_pose_reference_and_evidence_separate() -> None:
+    module = load_module()
+    result = module.correction_timing_metrics(
+        reference_ns=[1_000_000_000, 1_100_000_000],
+        evidence_ns=[1_099_000_000, 1_199_500_000],
+        mapping_output_ns=[1_125_000_000, 1_226_000_000],
+        application_ns=[1_127_000_000, 1_228_500_000],
+        receipt_ns=[1_128_000_000, 1_229_000_000],
+        sequences=[1, 2],
+        reset_ids=[7, 7],
+        valid=[True, True],
+    )
+
+    assert result["count"] == 2
+    assert result["valid_count"] == 2
+    assert result["timing_order_violation_count"] == 0
+    assert result["sequence_nonmonotonic_count"] == 0
+    assert math.isclose(result["scan_duration_ms"]["p50"], 99.25)
+    assert math.isclose(result["mapping_delay_from_newest_observation_ms"]["p50"], 26.25)
+    assert math.isclose(result["estimator_application_delay_ms"]["p50"], 2.25)
+    assert math.isclose(result["evidence_age_at_bridge_receipt_ms"]["p50"], 29.25)

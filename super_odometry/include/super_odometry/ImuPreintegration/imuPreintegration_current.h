@@ -13,6 +13,8 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <super_odometry_msgs/msg/state_estimation_calibration.hpp>
+#include <super_odometry_msgs/msg/lidar_correction.hpp>
+#include <super_odometry_msgs/msg/state_estimation_correction.hpp>
 
 
 #include "utility.h"
@@ -76,13 +78,14 @@ namespace super_odometry {
 
         bool readParameters();
 
-        void laserodometryHandler(const nav_msgs::msg::Odometry::SharedPtr odomMsg);
+        void laserodometryHandler(
+            const super_odometry_msgs::msg::LidarCorrection::SharedPtr correctionMsg);
 
         void imuHandler(const sensor_msgs::msg::Imu::SharedPtr imu_raw);
 
         void initial_system(double currentCorrectionTime, gtsam::Pose3 lidarPose);
 
-        void process_imu_odometry(double currentCorrectionTime, gtsam::Pose3 relativePose);
+        bool process_imu_odometry(double currentCorrectionTime, gtsam::Pose3 relativePose);
 
         bool build_graph(gtsam::Pose3 lidarPose, double curLaserodomtimestamp);
 
@@ -119,6 +122,10 @@ namespace super_odometry {
 
         void publishStateEstimationCalibration(double initialization_time);
 
+        void publishStateEstimationCorrection(
+            const super_odometry_msgs::msg::LidarCorrection &correction,
+            bool valid);
+
         void processTiming(const sensor_msgs::msg::Imu& thisImu);
 
         void initializeImu(const sensor_msgs::msg::Imu::SharedPtr& imu_raw);
@@ -138,7 +145,8 @@ namespace super_odometry {
     private:
 
         rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr subImu;
-        rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr subLaserOdometry;
+        rclcpp::Subscription<super_odometry_msgs::msg::LidarCorrection>::SharedPtr
+            subLidarCorrection;
         
 
         rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubImuOdometry;
@@ -146,6 +154,8 @@ namespace super_odometry {
         rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubImuPath;
         rclcpp::Publisher<super_odometry_msgs::msg::StateEstimationCalibration>::SharedPtr
             pubStateEstimationCalibration;
+        rclcpp::Publisher<super_odometry_msgs::msg::StateEstimationCorrection>::SharedPtr
+            pubStateEstimationCorrection;
 
 
         rclcpp::CallbackGroup::SharedPtr cb_group_;
@@ -183,6 +193,7 @@ namespace super_odometry {
         Eigen::Matrix3d R_wm_ = Eigen::Matrix3d::Identity();
         bool world_align_ready_ = false;
         std::uint64_t state_estimation_epoch_ = 0;
+        std::uint64_t last_lidar_correction_sequence_ = 0;
 
     public:
         MapRingBuffer<Imu::Ptr> imuBuf;

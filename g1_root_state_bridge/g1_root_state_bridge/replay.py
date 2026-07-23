@@ -158,8 +158,12 @@ class HistoricalRootStateReplayer:
         )
         self._core.update_correction(
             CorrectionSample(
-                stamp_ns=shifted_time_ns,
+                reference_time_ns=max(0, shifted_time_ns - 100_000_000),
+                evidence_time_ns=shifted_time_ns,
+                application_time_ns=shifted_time_ns + 200_000,
                 receipt_time_ns=shifted_time_ns + 250_000,
+                sequence=self._sequence,
+                reset_id=1,
                 covariance_diagonal=UNKNOWN_COVARIANCE_DIAGONAL,
             )
         )

@@ -20,7 +20,11 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from std_msgs.msg import Bool, String
-from super_odometry_msgs.msg import OptimizationStats, StateEstimationCalibration
+from super_odometry_msgs.msg import (
+    OptimizationStats,
+    StateEstimationCalibration,
+    StateEstimationCorrection,
+)
 
 from g1_root_state_bridge.bridge_core import (
     BridgeCore,
@@ -51,6 +55,7 @@ STATE_TOPIC = "/state_estimation"
 STATS_TOPIC = "/super_odometry_stats"
 HEALTH_TOPIC = "/state_estimation_health"
 CALIBRATION_TOPIC = "/state_estimation_calibration"
+CORRECTION_TOPIC = "/state_estimation_correction"
 PELVIS_TOPIC = "/pelvis_state_estimation"
 STATUS_TOPIC = "/pelvis_state_bridge/status"
 
@@ -202,6 +207,12 @@ class G1RootStateBridgeNode(Node):
         )
         self.create_subscription(Odometry, STATE_TOPIC, self._on_odometry, reliable)
         self.create_subscription(OptimizationStats, STATS_TOPIC, self._on_stats, reliable)
+        self.create_subscription(
+            StateEstimationCorrection,
+            CORRECTION_TOPIC,
+            self._on_correction,
+            reliable,
+        )
         self.create_subscription(Bool, HEALTH_TOPIC, self._on_health, reliable)
         self.create_subscription(
             StateEstimationCalibration,
@@ -313,7 +324,6 @@ class G1RootStateBridgeNode(Node):
     def _on_stats(self, message: OptimizationStats) -> None:
         if self._core is None:
             return
-        receipt_ns = time.time_ns()
         self._last_stats_uncertainty = (
             float(message.uncertainty_x),
             float(message.uncertainty_y),
@@ -322,19 +332,59 @@ class G1RootStateBridgeNode(Node):
             float(message.uncertainty_pitch),
             float(message.uncertainty_yaw),
         )
+
+    def _on_correction(self, message: StateEstimationCorrection) -> None:
+        if self._core is None:
+            return
+        receipt_ns = time.time_ns()
+        if message.semantics_version != "superodom-state-correction-v1":
+            self._status("correction_rejected", reason="unknown_semantics_version")
+            return
+        if (
+            self._last_calibration_reset_id is None
+            or int(message.reset_id) != self._last_calibration_reset_id
+        ):
+            self._status("correction_rejected", reason="reset_id_mismatch")
+            return
+        if message.header.frame_id != self._core.calibration.map_frame:
+            self._status("correction_rejected", reason="map_frame_mismatch")
+            return
+        if not bool(message.valid):
+            self._status("correction_rejected", reason="estimator_did_not_apply")
+            return
+        evidence_time_ns = _stamp_ns(message.newest_observation_stamp)
+        mapping_output_time_ns = _stamp_ns(message.mapping_output_stamp)
+        application_time_ns = _stamp_ns(message.application_stamp)
+        if not evidence_time_ns <= mapping_output_time_ns <= application_time_ns:
+            self._status("correction_rejected", reason="invalid_mapping_timing_order")
+            return
         try:
-            # SuperOdometry's six uncertainty values are bounded feature
-            # observability scores, not metric covariance. Preserve them in
-            # diagnostics and mark packet covariance explicitly unavailable.
-            self._core.update_correction(
-                CorrectionSample(
-                    stamp_ns=_stamp_ns(message.header.stamp),
-                    receipt_time_ns=receipt_ns,
-                    covariance_diagonal=UNKNOWN_COVARIANCE_DIAGONAL,
-                )
+            # correction_time_ns in HSROOT02 is the newest physical LiDAR
+            # return incorporated by an estimator-confirmed correction.  The
+            # scan-start pose-reference and application clocks stay explicit
+            # here instead of being conflated with freshness.
+            sample = CorrectionSample(
+                reference_time_ns=_stamp_ns(message.header.stamp),
+                evidence_time_ns=evidence_time_ns,
+                application_time_ns=application_time_ns,
+                receipt_time_ns=receipt_ns,
+                sequence=int(message.sequence),
+                reset_id=int(message.reset_id),
+                covariance_diagonal=UNKNOWN_COVARIANCE_DIAGONAL,
             )
+            self._core.update_correction(sample)
         except BridgeCoreError as error:
             self._status("correction_rejected", reason=str(error))
+            return
+        self._status(
+            "correction_accepted",
+            sequence=sample.sequence,
+            reset_id=sample.reset_id,
+            reference_time_ns=sample.reference_time_ns,
+            evidence_time_ns=sample.evidence_time_ns,
+            mapping_output_time_ns=mapping_output_time_ns,
+            application_time_ns=sample.application_time_ns,
+        )
         self._drain_pending(receipt_ns)
 
     def _on_health(self, message: Bool) -> None:
@@ -459,6 +509,8 @@ class G1RootStateBridgeNode(Node):
         self._pelvis_publisher.publish(message)
         self._status(
             "packet_published",
+            kind="packet",
+            payload_hex=payload.hex(),
             sequence=packet.sequence,
             source_epoch=packet.source_epoch,
             estimate_time_ns=packet.estimate_time_ns,

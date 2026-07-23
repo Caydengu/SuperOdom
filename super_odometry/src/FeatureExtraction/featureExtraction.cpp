@@ -587,7 +587,7 @@ void featureExtraction::removePointDistortion(
         return tempCloud;
     }
 
-    void featureExtraction::publishTopic(double lidar_start_time, 
+    void featureExtraction::publishTopic(double lidar_start_time, double lidar_end_time,
                                          pcl::PointCloud<point_os::PointcloudXYZITR>::Ptr laser_no_distortion_points,
                                          pcl::PointCloud<PointType>::Ptr edgePoints,
                                          pcl::PointCloud<PointType>::Ptr plannerPoints, 
@@ -597,6 +597,10 @@ void featureExtraction::removePointDistortion(
         FeatureHeader.frame_id = WORLD_FRAME;
         FeatureHeader.stamp = rclcpp::Time(lidar_start_time*1e9);
         laserFeature.header = FeatureHeader;
+        laserFeature.newest_observation_stamp =
+            static_cast<builtin_interfaces::msg::Time>(rclcpp::Time(
+                static_cast<int64_t>(std::llround(lidar_end_time * 1e9)),
+                RCL_ROS_TIME));
         laserFeature.imu_available = false;
         laserFeature.odom_available = false;
         
@@ -623,6 +627,7 @@ void featureExtraction::removePointDistortion(
 
     void featureExtraction::extractFeatures(
         double lidar_start_time,
+        double lidar_end_time,
         const pcl::PointCloud<point_os::PointcloudXYZITR>::Ptr& lidar_msg,
         const Eigen::Quaterniond& quaternion)
     {
@@ -635,7 +640,8 @@ void featureExtraction::removePointDistortion(
 
         uniformFeatureExtraction(lidar_msg, plannerPoints, config_.filter_point_size, config_.min_range);
         
-        publishTopic(lidar_start_time, lidar_msg, edgePoints, plannerPoints, bobPoints, quaternion);
+        publishTopic(lidar_start_time, lidar_end_time, lidar_msg, edgePoints,
+                     plannerPoints, bobPoints, quaternion);
     }
 
 
@@ -646,12 +652,19 @@ void featureExtraction::removePointDistortion(
 
         if ((LASER_IMU_SYNC_SCCUESS == true or LASER_CAMERA_SYNC_SUCCESS == true) and lidarBuf.getSize() > 0)
         {
-            double lidar_start_time;
+            double lidar_start_time = 0.0;
             lidarBuf.getFirstTime(lidar_start_time);
             pcl::PointCloud<point_os::PointcloudXYZITR>::Ptr lidar_msg;
             lidarBuf.getFirstMeas(lidar_msg);
 
-            double lidar_end_time = lidar_start_time + lidar_msg->back().time;
+            double lidar_end_time = lidar_start_time;
+            for (const auto &point : lidar_msg->points) {
+                if (std::isfinite(point.time) && point.time >= 0.0f) {
+                    lidar_end_time = std::max(
+                        lidar_end_time,
+                        lidar_start_time + static_cast<double>(point.time));
+                }
+            }
 
           
             if (LASER_IMU_SYNC_SCCUESS == true and LASER_CAMERA_SYNC_SUCCESS == true)
@@ -674,7 +687,8 @@ void featureExtraction::removePointDistortion(
             }
 
             // Extract features and publish
-            extractFeatures(lidar_start_time, lidar_msg, q_w_original_l);
+            extractFeatures(lidar_start_time, lidar_end_time, lidar_msg,
+                            q_w_original_l);
 
             LASER_CAMERA_SYNC_SUCCESS = false;
             LASER_IMU_SYNC_SCCUESS = false;
@@ -682,16 +696,26 @@ void featureExtraction::removePointDistortion(
         }
         else if (imuBuf.empty())
         {
-            double lidar_start_time;
+            double lidar_start_time = 0.0;
             lidarBuf.getFirstTime(lidar_start_time);
             pcl::PointCloud<point_os::PointcloudXYZITR>::Ptr lidar_msg;
             lidarBuf.getFirstMeas(lidar_msg);
+
+            double lidar_end_time = lidar_start_time;
+            for (const auto &point : lidar_msg->points) {
+                if (std::isfinite(point.time) && point.time >= 0.0f) {
+                    lidar_end_time = std::max(
+                        lidar_end_time,
+                        lidar_start_time + static_cast<double>(point.time));
+                }
+            }
          
             RCLCPP_INFO(this->get_logger(), "\033[1;32m----> no IMU data, running LiDAR Odometry only.\033[0m");
             Eigen::Quaterniond default_quaternion = Eigen::Quaterniond::Identity();
             
             // Extract features and publish with default quaternion
-            extractFeatures(lidar_start_time, lidar_msg, default_quaternion);
+            extractFeatures(lidar_start_time, lidar_end_time, lidar_msg,
+                            default_quaternion);
         }
         else
         {

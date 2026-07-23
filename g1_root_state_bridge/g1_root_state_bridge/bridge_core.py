@@ -83,18 +83,32 @@ class NormalizedLidarState:
 
 @dataclass(frozen=True)
 class CorrectionSample:
-    stamp_ns: int
+    reference_time_ns: int
+    evidence_time_ns: int
+    application_time_ns: int
     receipt_time_ns: int
+    sequence: int
+    reset_id: int
     covariance_diagonal: tuple[float, float, float, float, float, float]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.stamp_ns, int) or self.stamp_ns < 0:
-            raise BridgeCoreError("correction stamp must be a non-negative integer")
-        if (
-            not isinstance(self.receipt_time_ns, int)
-            or self.receipt_time_ns < self.stamp_ns
-        ):
-            raise BridgeCoreError("correction receipt time cannot predate its stamp")
+        ordered_times = (
+            self.reference_time_ns,
+            self.evidence_time_ns,
+            self.application_time_ns,
+            self.receipt_time_ns,
+        )
+        if not all(isinstance(value, int) and value >= 0 for value in ordered_times):
+            raise BridgeCoreError("correction times must be non-negative integers")
+        if tuple(sorted(ordered_times)) != ordered_times:
+            raise BridgeCoreError(
+                "correction times must satisfy reference <= evidence <= application <= receipt"
+            )
+        for name, value in (("sequence", self.sequence), ("reset_id", self.reset_id)):
+            if not isinstance(value, int) or not 0 <= value <= (1 << 64) - 1:
+                raise BridgeCoreError(
+                    f"correction {name} must be an unsigned 64-bit integer"
+                )
         if len(self.covariance_diagonal) != 6:
             raise BridgeCoreError("correction covariance must contain six values")
         if not all(
@@ -305,8 +319,10 @@ class BridgeCore:
     def update_correction(self, sample: CorrectionSample) -> None:
         if self._corrections:
             latest = self._corrections[-1]
-            if sample.stamp_ns <= latest.stamp_ns:
-                raise BridgeCoreError("correction timestamp is not strictly increasing")
+            if sample.sequence <= latest.sequence:
+                raise BridgeCoreError("correction sequence is not strictly increasing")
+            if sample.evidence_time_ns <= latest.evidence_time_ns:
+                raise BridgeCoreError("correction evidence time is not strictly increasing")
             if sample.receipt_time_ns < latest.receipt_time_ns:
                 raise BridgeCoreError("correction receipt time is not monotonic")
         self._corrections.append(sample)
@@ -325,9 +341,17 @@ class BridgeCore:
         self._corrections.clear()
         self._health = None
 
-    def _correction_at(self, estimate_time_ns: int) -> CorrectionSample | None:
+    def _correction_at(
+        self,
+        *,
+        estimate_time_ns: int,
+        observation_receipt_time_ns: int,
+    ) -> CorrectionSample | None:
         for sample in reversed(self._corrections):
-            if sample.stamp_ns <= estimate_time_ns:
+            if (
+                sample.evidence_time_ns <= estimate_time_ns
+                and sample.application_time_ns <= observation_receipt_time_ns
+            ):
                 return sample
         return None
 
@@ -366,7 +390,10 @@ class BridgeCore:
         pelvis_angular = _bridge_vector(
             pelvis.angular_velocity_world, "pelvis_angular_velocity_world"
         )
-        correction = self._correction_at(normalized.estimate_time_ns)
+        correction = self._correction_at(
+            estimate_time_ns=normalized.estimate_time_ns,
+            observation_receipt_time_ns=normalized.receipt_time_ns,
+        )
 
         health_flags = RootStateHealth(0)
         health_sample = self._health
@@ -381,7 +408,9 @@ class BridgeCore:
             health_flags |= RootStateHealth.JOINT_SYNC_VALID
         correction_fresh = (
             correction is not None
-            and 0 <= publish_time_ns - correction.stamp_ns <= self.max_correction_age_ns
+            and 0
+            <= publish_time_ns - correction.evidence_time_ns
+            <= self.max_correction_age_ns
         )
         if correction_fresh:
             health_flags |= RootStateHealth.CORRECTION_FRESH
@@ -402,7 +431,7 @@ class BridgeCore:
             health_flags |= RootStateHealth.CLOCK_VALID
 
         self._sequence += 1
-        correction_time_ns = 0 if correction is None else correction.stamp_ns
+        correction_time_ns = 0 if correction is None else correction.evidence_time_ns
         covariance = (
             UNKNOWN_COVARIANCE_DIAGONAL
             if correction is None

@@ -109,7 +109,9 @@ namespace super_odometry {
 
         void undistortionAndFeatureExtraction();
 
-        void extractFeatures(double lidar_start_time, const pcl::PointCloud<point_os::PointcloudXYZITR>::Ptr& lidar_msg, const Eigen::Quaterniond& quaternion);
+        void extractFeatures(double lidar_start_time, double lidar_end_time,
+            const pcl::PointCloud<point_os::PointcloudXYZITR>::Ptr& lidar_msg,
+            const Eigen::Quaterniond& quaternion);
 
         void imu_Handler(const sensor_msgs::msg::Imu::SharedPtr msg_in);
 
@@ -133,7 +135,7 @@ namespace super_odometry {
 
         bool readParameters();
 
-        void publishTopic(double lidar_start_time, 
+        void publishTopic(double lidar_start_time, double lidar_end_time,
                                          pcl::PointCloud<point_os::PointcloudXYZITR>::Ptr laser_no_distortion_points,
                                          pcl::PointCloud<PointType>::Ptr edgePoints,
                                          pcl::PointCloud<PointType>::Ptr plannerPoints, 

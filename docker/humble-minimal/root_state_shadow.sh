@@ -188,9 +188,11 @@ record_topics=(
   /livox/imu
   /state_estimation
   /laser_odometry
+  /lidar_correction
   /super_odometry_stats
   /state_estimation_health
   /state_estimation_calibration
+  /state_estimation_correction
   /prediction_source
   /pelvis_state_estimation
   /pelvis_state_bridge/status
@@ -218,6 +220,7 @@ ros2 run g1_root_state_bridge g1-root-state-bridge --ros-args \
 bridge_pid=$!
 
 wait_for_type /state_estimation nav_msgs/msg/Odometry 45
+wait_for_type /state_estimation_correction super_odometry_msgs/msg/StateEstimationCorrection 45
 wait_for_type /pelvis_state_estimation nav_msgs/msg/Odometry 60
 timeout 60s ros2 topic echo --once /pelvis_state_estimation \
   > /output/logs/first_pelvis_state.txt
@@ -249,7 +252,7 @@ launch_pid=""
   echo "Root-state bridge did not produce a status trace" >&2
   exit 40
 }
-grep -q packet_published /output/data/bridge_status.jsonl || {
+grep -Fq strictly_valid\":true /output/data/bridge_status.jsonl || {
   echo "Root-state bridge published no strict packet" >&2
   exit 41
 }

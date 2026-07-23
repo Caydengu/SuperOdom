@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import socket
 import time
+from pathlib import Path
 
 import pytest
 
@@ -14,7 +16,10 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool
-from super_odometry_msgs.msg import OptimizationStats, StateEstimationCalibration
+from super_odometry_msgs.msg import (
+    StateEstimationCalibration,
+    StateEstimationCorrection,
+)
 
 from g1_root_state_bridge.bridge_node import G1RootStateBridgeNode
 from g1_root_state_bridge.joint_contract import CANONICAL_G1_JOINT_NAMES
@@ -48,10 +53,13 @@ def _spin_until(executor: SingleThreadedExecutor, predicate, timeout_s: float) -
         executor.spin_once(timeout_sec=0.005)
 
 
-def test_typed_ros_and_udp_inputs_produce_one_strict_zmq_v2_packet() -> None:
+def test_typed_ros_and_udp_inputs_produce_one_strict_zmq_v2_packet(
+    tmp_path: Path,
+) -> None:
     udp_port = _free_port(socket.SOCK_DGRAM)
     tcp_port = _free_port(socket.SOCK_STREAM)
     endpoint = f"tcp://127.0.0.1:{tcp_port}"
+    replay_path = tmp_path / "live_packets.jsonl"
 
     rclpy.init()
     bridge = G1RootStateBridgeNode(
@@ -62,6 +70,7 @@ def test_typed_ros_and_udp_inputs_produce_one_strict_zmq_v2_packet() -> None:
             Parameter("max_joint_transport_age_ms", value=100.0),
             Parameter("max_joint_sync_gap_ms", value=20.0),
             Parameter("pending_state_timeout_ms", value=100.0),
+            Parameter("replay_jsonl_path", value=str(replay_path)),
         ]
     )
     harness = rclpy.create_node("synthetic_root_state_harness")
@@ -86,9 +95,9 @@ def test_typed_ros_and_udp_inputs_produce_one_strict_zmq_v2_packet() -> None:
         "/state_estimation_calibration",
         latched,
     )
-    stats_pub = harness.create_publisher(
-        OptimizationStats,
-        "/super_odometry_stats",
+    correction_pub = harness.create_publisher(
+        StateEstimationCorrection,
+        "/state_estimation_correction",
         reliable,
     )
     health_pub = harness.create_publisher(
@@ -171,9 +180,17 @@ def test_typed_ros_and_udp_inputs_produce_one_strict_zmq_v2_packet() -> None:
             1.0,
         )
 
-        stats = OptimizationStats()
-        _stamp(stats.header.stamp, estimate_ns - 1_000_000)
-        stats_pub.publish(stats)
+        correction = StateEstimationCorrection()
+        _stamp(correction.header.stamp, estimate_ns - 101_000_000)
+        correction.header.frame_id = "map"
+        correction.semantics_version = "superodom-state-correction-v1"
+        correction.sequence = 7
+        _stamp(correction.newest_observation_stamp, estimate_ns - 1_000_000)
+        _stamp(correction.mapping_output_stamp, estimate_ns - 500_000)
+        _stamp(correction.application_stamp, estimate_ns - 250_000)
+        correction.reset_id = 1
+        correction.valid = True
+        correction_pub.publish(correction)
         _spin_until(executor, lambda: len(bridge._core._corrections) == 1, 1.0)
 
         odometry = Odometry()
@@ -212,6 +229,13 @@ def test_typed_ros_and_udp_inputs_produce_one_strict_zmq_v2_packet() -> None:
         assert packet.correction_time_ns == estimate_ns - 1_000_000
         assert packet.calibration_digest == bridge._calibration_contract.digest
         assert packet.publish_time_ns >= packet.estimate_time_ns
+        records = [
+            json.loads(line)
+            for line in replay_path.read_text(encoding="utf-8").splitlines()
+        ]
+        packet_records = [record for record in records if record.get("kind") == "packet"]
+        assert len(packet_records) == 1
+        assert bytes.fromhex(packet_records[0]["payload_hex"]) == payloads[0]
     finally:
         joint_sender.close()
         subscriber.close(linger=0)

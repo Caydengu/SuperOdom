@@ -73,6 +73,10 @@ namespace super_odometry {
         pubOdomAftMapped = this->create_publisher<nav_msgs::msg::Odometry>(
             ProjectName+"/laser_odometry", 1);
 
+        pubLidarCorrection =
+            this->create_publisher<super_odometry_msgs::msg::LidarCorrection>(
+                ProjectName+"/lidar_correction", 5);
+
         pubLaserOdometryIncremental = this->create_publisher<nav_msgs::msg::Odometry>(
             ProjectName+"/aft_mapped_to_init_incremental", 1);
 
@@ -247,12 +251,24 @@ namespace super_odometry {
    
 
     void laserMapping::laserFeatureInfoHandler(const super_odometry_msgs::msg::LaserFeature::SharedPtr msgIn) {
-       
+        const double scan_start = secs(msgIn.get());
+        const double scan_end =
+            msgIn->newest_observation_stamp.sec +
+            msgIn->newest_observation_stamp.nanosec * 1e-9;
+        if (!std::isfinite(scan_end) || scan_end < scan_start) {
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "Rejecting feature scan with invalid observation interval: start=%.9f end=%.9f",
+                scan_start, scan_end);
+            return;
+        }
+
         mBuf.lock();
         cornerLastBuf.push(msgIn->cloud_corner);
         surfLastBuf.push(msgIn->cloud_surface);
         realsenseBuf.push(msgIn->cloud_realsense);
         fullResBuf.push(msgIn->cloud_nodistortion);
+        newestObservationTimeBuf.push(scan_end);
         Eigen::Quaterniond imu_orientation(msgIn->initial_quaternion_w, msgIn->initial_quaternion_x,
                                              msgIn->initial_quaternion_y, msgIn->initial_quaternion_z);
         imu_orientation.normalize();
@@ -579,8 +595,22 @@ return PredictionSource::CONSTANT_VELOCITY;
             odomAftMapped.pose.covariance[0] = 0;
         }
 
-        rclcpp::Time pub_time = rclcpp::Clock{RCL_ROS_TIME}.now(); //PARV_TODO - find how to syncrynoise this with rosbag time
+        const rclcpp::Time pub_time = this->get_clock()->now();
         pubOdomAftMapped->publish(odomAftMapped);
+
+        super_odometry_msgs::msg::LidarCorrection timed_correction;
+        timed_correction.semantics_version =
+            "superodom-lidar-correction-v1";
+        timed_correction.sequence = ++lidarCorrectionSequence;
+        timed_correction.newest_observation_stamp =
+            static_cast<builtin_interfaces::msg::Time>(rclcpp::Time(
+                static_cast<int64_t>(
+                    std::llround(timeNewestLidarObservation * 1e9)),
+                RCL_ROS_TIME));
+        timed_correction.output_stamp =
+            static_cast<builtin_interfaces::msg::Time>(pub_time);
+        timed_correction.odometry = odomAftMapped;
+        pubLidarCorrection->publish(timed_correction);
 
         geometry_msgs::msg::PoseStamped laserAfterMappedPose;
         laserAfterMappedPose.header = odomAftMapped.header;
@@ -660,8 +690,9 @@ return PredictionSource::CONSTANT_VELOCITY;
 
     
     bool  laserMapping::checkDataAvailable() const{
-        return !cornerLastBuf.empty() && !surfLastBuf.empty() 
-               && !fullResBuf.empty() && !IMUPredictionBuf.empty();       
+        return !cornerLastBuf.empty() && !surfLastBuf.empty()
+               && !fullResBuf.empty() && !newestObservationTimeBuf.empty()
+               && !IMUPredictionBuf.empty();
         //Note: in pure laser odometry, IMU Prediction will be identy. 
     }
 
@@ -671,6 +702,9 @@ return PredictionSource::CONSTANT_VELOCITY;
         //1. Extract timestamp
         data.timestamp=secs(&fullResBuf.front());
         timeLaserOdometry=data.timestamp;
+        data.newest_observation_timestamp = newestObservationTimeBuf.front();
+        newestObservationTimeBuf.pop();
+        timeNewestLidarObservation = data.newest_observation_timestamp;
 
         //2. Extract point cloud data 
         pcl::fromROSMsg(cornerLastBuf.front(), *laserCloudCornerLast);
@@ -705,6 +739,7 @@ return PredictionSource::CONSTANT_VELOCITY;
         clearBuffer(cornerLastBuf);
         clearBuffer(surfLastBuf);
         clearBuffer(fullResBuf);
+        clearBuffer(newestObservationTimeBuf);
         clearBuffer(IMUPredictionBuf);
     }
 

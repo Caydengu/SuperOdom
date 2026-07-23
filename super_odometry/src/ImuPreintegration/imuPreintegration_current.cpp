@@ -43,8 +43,9 @@ namespace super_odometry {
             IMU_TOPIC, imu_qos,
             std::bind(&imuPreintegration::imuHandler, this,
                         std::placeholders::_1), sub_options);
-        subLaserOdometry = this->create_subscription<nav_msgs::msg::Odometry>(
-            ProjectName+"/laser_odometry", 5,
+        subLidarCorrection =
+            this->create_subscription<super_odometry_msgs::msg::LidarCorrection>(
+            ProjectName+"/lidar_correction", 5,
             std::bind(&imuPreintegration::laserodometryHandler, this,
                         std::placeholders::_1), sub_options);
 
@@ -58,6 +59,9 @@ namespace super_odometry {
         pubStateEstimationCalibration =
             this->create_publisher<super_odometry_msgs::msg::StateEstimationCalibration>(
                 ProjectName+"/state_estimation_calibration", calibration_qos);
+        pubStateEstimationCorrection =
+            this->create_publisher<super_odometry_msgs::msg::StateEstimationCorrection>(
+                ProjectName+"/state_estimation_correction", 10);
         pubImuPath = this->create_publisher<nav_msgs::msg::Path>(
             ProjectName+"/imuodom_path", 1);
 
@@ -438,6 +442,28 @@ namespace super_odometry {
         pubStateEstimationCalibration->publish(calibration);
     }
 
+    void imuPreintegration::publishStateEstimationCorrection(
+        const super_odometry_msgs::msg::LidarCorrection &correction,
+        bool valid) {
+        if (!pubStateEstimationCorrection) {
+            return;
+        }
+        super_odometry_msgs::msg::StateEstimationCorrection applied;
+        applied.header = correction.odometry.header;
+        applied.semantics_version = "superodom-state-correction-v1";
+        applied.sequence = correction.sequence;
+        applied.newest_observation_stamp = correction.newest_observation_stamp;
+        applied.mapping_output_stamp = correction.output_stamp;
+        const rclcpp::Time application_time = this->get_clock()->now();
+        applied.application_stamp =
+            static_cast<builtin_interfaces::msg::Time>(application_time);
+        applied.reset_id = state_estimation_epoch_;
+        const rclcpp::Time mapping_output_time(correction.output_stamp);
+        applied.valid = valid && systemInitialized &&
+                        mapping_output_time <= application_time;
+        pubStateEstimationCorrection->publish(applied);
+    }
+
     void imuPreintegration::integrate_imumeasurement(double currentCorrectionTime) {
         // Safety check: ensure integrator is initialized
         if (!imuIntegratorOpt_) {
@@ -602,7 +628,7 @@ namespace super_odometry {
         }
     }
 
-    void imuPreintegration::process_imu_odometry(double currentCorrectionTime, gtsam::Pose3 relativePose) {
+    bool imuPreintegration::process_imu_odometry(double currentCorrectionTime, gtsam::Pose3 relativePose) {
 
         // reset graph for speed and stability
         if (key > 100) {  // Reduced threshold for more frequent resets
@@ -620,8 +646,9 @@ namespace super_odometry {
         // 3. check optimization
         if (failureDetection(prevVel_, prevBias_) || !successOptimization) {
             RCLCPP_WARN(this->get_logger(), "failureDetected");
+            health_status = false;
             resetParams();
-            return;
+            return false;
         }
 
         // 4. reprogate_imuodometry
@@ -630,6 +657,7 @@ namespace super_odometry {
         ++key;
 
         doneFirstOpt = true;
+        return true;
     }
 
     bool imuPreintegration::failureDetection(const gtsam::Vector3 &velCur,
@@ -653,14 +681,49 @@ namespace super_odometry {
         return false;
     }
 
-    void imuPreintegration::laserodometryHandler(const nav_msgs::msg::Odometry::SharedPtr odomMsg) {
+    void imuPreintegration::laserodometryHandler(
+        const super_odometry_msgs::msg::LidarCorrection::SharedPtr correctionMsg) {
         std::lock_guard<std::mutex> lock(mBuf);
+
+        auto odomMsg =
+            std::make_shared<nav_msgs::msg::Odometry>(correctionMsg->odometry);
+        const auto stamp_ns = [](const builtin_interfaces::msg::Time &stamp) {
+            return static_cast<std::int64_t>(stamp.sec) * 1000000000LL +
+                   static_cast<std::int64_t>(stamp.nanosec);
+        };
+        const std::int64_t reference_ns = stamp_ns(odomMsg->header.stamp);
+        const std::int64_t observation_ns =
+            stamp_ns(correctionMsg->newest_observation_stamp);
+        const std::int64_t mapping_output_ns = stamp_ns(correctionMsg->output_stamp);
+        const bool timing_valid =
+            correctionMsg->semantics_version ==
+                "superodom-lidar-correction-v1" &&
+            correctionMsg->sequence > last_lidar_correction_sequence_ &&
+            reference_ns >= 0 && reference_ns <= observation_ns &&
+            observation_ns <= mapping_output_ns;
+        if (!timing_valid) {
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "Rejecting invalid LiDAR correction timing contract: sequence=%llu reference=%lld observation=%lld output=%lld semantics=%s",
+                static_cast<unsigned long long>(correctionMsg->sequence),
+                static_cast<long long>(reference_ns),
+                static_cast<long long>(observation_ns),
+                static_cast<long long>(mapping_output_ns),
+                correctionMsg->semantics_version.c_str());
+            health_status = false;
+            publishStateEstimationCorrection(*correctionMsg, false);
+            return;
+        }
+        last_lidar_correction_sequence_ = correctionMsg->sequence;
 
         cur_frame = odomMsg;
         double lidarOdomTime = secs(odomMsg);
 
-        if (imuQueOpt.empty())
+        if (imuQueOpt.empty()) {
+            health_status = false;
+            publishStateEstimationCorrection(*correctionMsg, false);
             return;
+        }
 
         float p_x = odomMsg->pose.pose.position.x;
         float p_y = odomMsg->pose.pose.position.y;
@@ -678,12 +741,23 @@ namespace super_odometry {
         // 0. initialize system
         if (systemInitialized == false) {
             initial_system(lidarOdomTime, lidarPose);
+            const bool initial_correction_valid =
+                systemInitialized &&
+                static_cast<int>(odomMsg->pose.covariance[0]) != 1;
+            health_status = initial_correction_valid;
+            publishStateEstimationCorrection(
+                *correctionMsg, initial_correction_valid);
             return;
         }
 
         TicToc Optimization_time;
         //1. process imu odometry
-        process_imu_odometry(lidarOdomTime, lidarPose);
+        const bool correction_applied =
+            process_imu_odometry(lidarOdomTime, lidarPose);
+        if (!correction_applied) {
+            publishStateEstimationCorrection(*correctionMsg, false);
+            return;
+        }
 
         // 2. safe landing process
         double latest_imu_time = secs(&imuQueImu.back());
@@ -694,6 +768,7 @@ namespace super_odometry {
           
             if((int)odomMsg->pose.covariance[0] == 1) {
                 RESULT = IMU_STATE::FAIL;
+                health_status = false;
             }
          
         } else {
@@ -718,6 +793,9 @@ namespace super_odometry {
                 pubHealthStatus->publish(health_status_msg);
             }
         }
+
+        publishStateEstimationCorrection(
+            *correctionMsg, correction_applied && health_status);
 
         last_frame = cur_frame;
         last_processed_lidar_time = lidarOdomTime;

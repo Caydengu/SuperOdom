@@ -26,6 +26,10 @@ def test_root_state_shadow_launches_bridge_and_records_only_compact_topics():
     assert "/pelvis_state_estimation" in source
     assert "/pelvis_state_bridge/status" in source
     assert "/state_estimation_calibration" in source
+    assert "/lidar_correction" in source
+    assert "/state_estimation_correction" in source
+    assert "strictly_valid" in source
+    assert "grep -q packet_published" not in source
     assert "ros2 topic hz" not in source
 
     record_block = source.split("record_topics=(", maxsplit=1)[1].split(")", maxsplit=1)[0]

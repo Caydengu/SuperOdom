@@ -43,6 +43,53 @@ def test_superodometry_exposes_one_latched_typed_alignment_contract() -> None:
     assert "publishStateEstimationCalibration" in source
 
 
+def test_superodometry_exposes_explicit_scan_and_applied_correction_times() -> None:
+    laser_feature = _read("super_odometry_msgs/msg/LaserFeature.msg")
+    assert "builtin_interfaces/Time newest_observation_stamp" in laser_feature
+
+    lidar_correction = _read("super_odometry_msgs/msg/LidarCorrection.msg")
+    for field in (
+        "string semantics_version",
+        "uint64 sequence",
+        "builtin_interfaces/Time newest_observation_stamp",
+        "builtin_interfaces/Time output_stamp",
+        "nav_msgs/Odometry odometry",
+    ):
+        assert field in lidar_correction
+
+    state_correction = _read(
+        "super_odometry_msgs/msg/StateEstimationCorrection.msg"
+    )
+    for field in (
+        "std_msgs/Header header",
+        "string semantics_version",
+        "uint64 sequence",
+        "builtin_interfaces/Time newest_observation_stamp",
+        "builtin_interfaces/Time mapping_output_stamp",
+        "builtin_interfaces/Time application_stamp",
+        "uint64 reset_id",
+        "bool valid",
+    ):
+        assert field in state_correction
+
+    message_cmake = _read("super_odometry_msgs/CMakeLists.txt")
+    assert '"msg/LidarCorrection.msg"' in message_cmake
+    assert '"msg/StateEstimationCorrection.msg"' in message_cmake
+
+    feature_source = _read(
+        "super_odometry/src/FeatureExtraction/featureExtraction.cpp"
+    )
+    mapping_source = _read("super_odometry/src/LaserMapping/laserMapping.cpp")
+    preintegration_source = _read(
+        "super_odometry/src/ImuPreintegration/imuPreintegration_current.cpp"
+    )
+    assert "newest_observation_stamp" in feature_source
+    assert "pubLidarCorrection" in mapping_source
+    assert 'ProjectName+"/lidar_correction"' in mapping_source
+    assert "publishStateEstimationCorrection" in preintegration_source
+    assert 'ProjectName+"/state_estimation_correction"' in preintegration_source
+
+
 def test_bridge_is_an_ament_python_package_with_typed_ros_inputs() -> None:
     package = _read("g1_root_state_bridge/package.xml")
     setup = _read("g1_root_state_bridge/setup.py")
@@ -59,9 +106,11 @@ def test_bridge_is_an_ament_python_package_with_typed_ros_inputs() -> None:
     assert "nav_msgs.msg import Odometry" in node
     assert "std_msgs.msg import Bool" in node
     assert "OptimizationStats" in node
+    assert "StateEstimationCorrection" in node
     assert "StateEstimationCalibration" in node
     assert '"/state_estimation"' in node
     assert '"/super_odometry_stats"' in node
+    assert '"/state_estimation_correction"' in node
     assert '"/state_estimation_health"' in node
     assert '"/state_estimation_calibration"' in node
     assert "serialize_root_state_v2" in node
