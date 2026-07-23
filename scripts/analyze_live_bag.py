@@ -334,6 +334,100 @@ def correction_timing_metrics(
     }
 
 
+def correction_gap_events(
+    *,
+    reference_ns: Sequence[int],
+    evidence_ns: Sequence[int],
+    mapping_output_ns: Sequence[int],
+    receipt_ns: Sequence[int],
+    sequences: Sequence[int],
+    stats_header_ns: Sequence[int],
+    stats_optimization_ms: Sequence[float],
+    stats_processing_ms: Sequence[float],
+    threshold_ms: float,
+) -> dict[str, Any]:
+    correction_lengths = {
+        len(reference_ns),
+        len(evidence_ns),
+        len(mapping_output_ns),
+        len(receipt_ns),
+        len(sequences),
+    }
+    if len(correction_lengths) != 1:
+        raise ValueError("correction gap event counts differ")
+    if not (
+        len(stats_header_ns)
+        == len(stats_optimization_ms)
+        == len(stats_processing_ms)
+    ):
+        raise ValueError("optimization statistics counts differ")
+
+    stats_by_reference = {
+        int(header): {
+            "optimization_ms": float(optimization),
+            "frame_processing_ms": float(processing),
+        }
+        for header, optimization, processing in zip(
+            stats_header_ns,
+            stats_optimization_ms,
+            stats_processing_ms,
+        )
+    }
+    events: list[dict[str, Any]] = []
+    for index in range(1, len(evidence_ns)):
+        evidence_gap_ms = (evidence_ns[index] - evidence_ns[index - 1]) / 1e6
+        if evidence_gap_ms <= threshold_ms:
+            continue
+        events.append(
+            {
+                "ending_index": index,
+                "ending_sequence": int(sequences[index]),
+                "sequence_delta": int(sequences[index] - sequences[index - 1]),
+                "elapsed_from_first_evidence_s": (
+                    evidence_ns[index] - evidence_ns[0]
+                )
+                / 1e9,
+                "previous_reference_ns": int(reference_ns[index - 1]),
+                "ending_reference_ns": int(reference_ns[index]),
+                "previous_evidence_ns": int(evidence_ns[index - 1]),
+                "ending_evidence_ns": int(evidence_ns[index]),
+                "evidence_gap_ms": evidence_gap_ms,
+                "reference_gap_ms": (
+                    reference_ns[index] - reference_ns[index - 1]
+                )
+                / 1e6,
+                "mapping_output_gap_ms": (
+                    mapping_output_ns[index] - mapping_output_ns[index - 1]
+                )
+                / 1e6,
+                "receipt_gap_ms": (receipt_ns[index] - receipt_ns[index - 1]) / 1e6,
+                "mapping_delay_before_gap_ms": (
+                    mapping_output_ns[index - 1] - evidence_ns[index - 1]
+                )
+                / 1e6,
+                "mapping_delay_after_gap_ms": (
+                    mapping_output_ns[index] - evidence_ns[index]
+                )
+                / 1e6,
+                "transport_delay_after_gap_ms": (
+                    receipt_ns[index] - mapping_output_ns[index]
+                )
+                / 1e6,
+                "stats_for_previous_reference": stats_by_reference.get(
+                    int(reference_ns[index - 1])
+                ),
+                "stats_for_ending_reference": stats_by_reference.get(
+                    int(reference_ns[index])
+                ),
+            }
+        )
+    return {
+        "threshold_ms": float(threshold_ms),
+        "count": len(events),
+        "events": events,
+    }
+
+
 def timestamp_correspondence(source_ns: Sequence[int], output_ns: Sequence[int]) -> dict[str, Any]:
     source = set(source_ns)
     output = set(output_ns)
@@ -590,6 +684,20 @@ def analyze_bag(bag_path: Path, launch_wall_ns: int | None = None) -> dict[str, 
                 "translation_from_last_m": distribution(stats_translation_from_last),
                 "rotation_from_last_rad": distribution(stats_rotation_from_last),
             }
+        )
+    if state_correction_reference:
+        result["state_estimation_correction"]["gap_events_over_250_ms"] = (
+            correction_gap_events(
+                reference_ns=state_correction_reference,
+                evidence_ns=state_correction_evidence,
+                mapping_output_ns=state_correction_mapping_output,
+                receipt_ns=state_correction_receipt,
+                sequences=state_correction_sequence,
+                stats_header_ns=stats_header,
+                stats_optimization_ms=stats_optimization_ms,
+                stats_processing_ms=stats_processing_ms,
+                threshold_ms=250.0,
+            )
         )
     return result
 

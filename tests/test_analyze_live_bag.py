@@ -128,3 +128,31 @@ def test_correction_timing_metrics_keep_pose_reference_and_evidence_separate() -
     assert math.isclose(result["mapping_delay_from_newest_observation_ms"]["p50"], 26.25)
     assert math.isclose(result["estimator_application_delay_ms"]["p50"], 2.25)
     assert math.isclose(result["evidence_age_at_bridge_receipt_ms"]["p50"], 29.25)
+
+
+def test_correction_gap_events_localize_gaps_before_mapping_output() -> None:
+    module = load_module()
+    result = module.correction_gap_events(
+        reference_ns=[1_000_000_000, 1_100_000_000, 1_400_000_000],
+        evidence_ns=[1_090_000_000, 1_190_000_000, 1_490_000_000],
+        mapping_output_ns=[1_110_000_000, 1_215_000_000, 1_515_000_000],
+        receipt_ns=[1_112_000_000, 1_217_000_000, 1_517_000_000],
+        sequences=[20, 21, 22],
+        stats_header_ns=[1_000_000_000, 1_100_000_000, 1_400_000_000],
+        stats_optimization_ms=[8.0, 9.0, 10.0],
+        stats_processing_ms=[11.0, 12.0, 13.0],
+        threshold_ms=250.0,
+    )
+
+    assert result["threshold_ms"] == 250.0
+    assert result["count"] == 1
+    event = result["events"][0]
+    assert event["ending_sequence"] == 22
+    assert math.isclose(event["evidence_gap_ms"], 300.0)
+    assert math.isclose(event["reference_gap_ms"], 300.0)
+    assert math.isclose(event["mapping_delay_after_gap_ms"], 25.0)
+    assert math.isclose(event["receipt_gap_ms"], 300.0)
+    assert event["stats_for_ending_reference"] == {
+        "optimization_ms": 10.0,
+        "frame_processing_ms": 13.0,
+    }
