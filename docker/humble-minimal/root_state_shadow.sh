@@ -110,6 +110,8 @@ duration_sec=$1
 launch_pid=""
 bridge_pid=""
 recorder_pid=""
+int_wait_iterations=75
+term_wait_iterations=25
 
 stop_process() {
   local pid=$1
@@ -117,13 +119,21 @@ stop_process() {
   [[ -n "$pid" ]] || return 0
   kill -0 -- "-$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return 0; }
   kill -INT -- "-$pid" 2>/dev/null || true
-  for _ in $(seq 1 75); do
+  for _ in $(seq 1 "$int_wait_iterations"); do
     kill -0 -- "-$pid" 2>/dev/null || break
     sleep 0.2
   done
   if kill -0 -- "-$pid" 2>/dev/null; then
     echo "$label did not stop after SIGINT; sending SIGTERM" >&2
     kill -TERM -- "-$pid" 2>/dev/null || true
+    for _ in $(seq 1 "$term_wait_iterations"); do
+      kill -0 -- "-$pid" 2>/dev/null || break
+      sleep 0.2
+    done
+  fi
+  if kill -0 -- "-$pid" 2>/dev/null; then
+    echo "$label did not stop after SIGTERM; sending SIGKILL" >&2
+    kill -KILL -- "-$pid" 2>/dev/null || true
   fi
   wait "$pid" 2>/dev/null || true
 }

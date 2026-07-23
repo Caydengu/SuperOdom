@@ -41,6 +41,10 @@ def test_root_state_shadow_launches_bridge_and_records_only_compact_topics():
     assert '[[ "$pre_publishers" == "1" ]]' in source
     assert 'active_publishers="$(publisher_count /livox/lidar)"' in source
     assert '[[ "$active_publishers" == "1" ]]' in source
+    assert 'kill -TERM -- "-$pid"' in source
+    assert 'kill -KILL -- "-$pid"' in source
+    assert "$label did not stop after SIGTERM; sending SIGKILL" in source
+    assert "term_wait_iterations=25" in source
 
     record_block = source.split("record_topics=(", maxsplit=1)[1].split(")", maxsplit=1)[0]
     assert "/livox/lidar" not in record_block
