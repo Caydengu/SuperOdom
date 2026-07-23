@@ -1,0 +1,25 @@
+{
+  "schema": "g1_dynamic_reference_score_config_v1",
+  "target_clock_id": "unix_realtime_ns",
+  "reference_calibration_id": "REPLACE_WITH_VALIDATED_CALIBRATION_ID",
+  "calibration_interval_ns": [
+    0,
+    0
+  ],
+  "evaluation_interval_ns": [
+    0,
+    0
+  ],
+  "waist_interval_ns": [
+    0,
+    0
+  ],
+  "max_interpolation_gap_ns": 25000000,
+  "max_clock_mapping_residual_ns": 5000000,
+  "minimum_coverage": 0.9,
+  "horizontal_p95_limit_m": 0.05,
+  "vertical_p95_limit_m": 0.03,
+  "yaw_p95_limit_deg": 1.5,
+  "waist_position_residual_limit_m": 0.02,
+  "waist_yaw_residual_limit_deg": 0.5
+}

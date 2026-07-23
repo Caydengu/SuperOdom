@@ -1,0 +1,47 @@
+{
+  "schema": "g1_optitrack_pelvis_calibration_v1",
+  "status": "UNMEASURED_DO_NOT_USE",
+  "calibration_id": "REPLACE_WITH_VERSIONED_DIRECT_PELVIS_CALIBRATION_ID",
+  "raw_capture_calibration_id": "REPLACE_WITH_MOTIVE_RIGID_BODY_DEFINITION_ID",
+  "rigid_body_id": -1,
+  "rigid_body_name": "REPLACE_WITH_DIRECT_PELVIS_RIGID_BODY_NAME",
+  "tracked_link": "pelvis",
+  "target_frame_id": "REPLACE_WITH_GRAVITY_ALIGNED_REFERENCE_FRAME",
+  "clock_id": "unix_realtime_ns",
+  "clock_mapping_method": "natnet_seconds_since_host_timestamp",
+  "clock_mapping_calibration_id": "REPLACE_WITH_CLOCK_AUDIT_ID",
+  "clock_mapping_residual_p95_ns": 6000000,
+  "max_clock_mapping_residual_ns": 5000000,
+  "maximum_marker_error_m": 0.005,
+  "maximum_velocity_interval_ns": 25000000,
+  "transform_convention": "T_A_B maps coordinates from frame B into frame A",
+  "T_target_motive_world": {
+    "translation_m": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "quaternion_wxyz": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "T_rigid_body_pelvis": {
+    "translation_m": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "quaternion_wxyz": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "measurement_method": "REPLACE_WITH_SURVEY_AND_RIGID_BODY_DEFINITION_METHOD",
+  "translation_uncertainty_m": null,
+  "orientation_uncertainty_deg": null
+}

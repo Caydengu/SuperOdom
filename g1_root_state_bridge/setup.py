@@ -11,7 +11,12 @@ setup(
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
     ],
-    package_data={package_name: ["assets/*.urdf"]},
+    package_data={
+        package_name: [
+            "assets/*.urdf",
+            "config/*.json",
+        ]
+    },
     install_requires=["setuptools"],
     zip_safe=False,
     maintainer="Cayden Gu",
@@ -21,6 +26,12 @@ setup(
     entry_points={
         "console_scripts": [
             "g1-root-state-bridge = g1_root_state_bridge.bridge_node:main",
+            "g1-dynamic-reference-score = "
+            "g1_root_state_bridge.dynamic_reference_cli:main",
+            "g1-optitrack-normalize = "
+            "g1_root_state_bridge.optitrack_reference_cli:main",
+            "g1-optitrack-clock-audit = "
+            "g1_root_state_bridge.optitrack_clock_audit_cli:main",
         ],
     },
 )
