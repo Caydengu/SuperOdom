@@ -10,6 +10,7 @@ import sys
 from g1_root_state_bridge.policy_state_trace import (
     PolicyStateTraceError,
     write_policy_state_replay,
+    write_simulation_pair,
 )
 
 
@@ -34,9 +35,11 @@ def _parser() -> argparse.ArgumentParser:
             "from retained bridge evidence."
         )
     )
-    parser.add_argument("--bridge-status-jsonl", type=Path, required=True)
-    parser.add_argument("--output-jsonl", type=Path, required=True)
-    parser.add_argument("--summary-json", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--bridge-status-jsonl", type=Path)
+    source.add_argument("--write-simulation-pair", type=Path)
+    parser.add_argument("--output-jsonl", type=Path)
+    parser.add_argument("--summary-json", type=Path)
     parser.add_argument("--samples", type=int, default=522)
     parser.add_argument("--rate-hz", type=float, default=50.0)
     parser.add_argument("--warmup-seconds", type=float, default=30.0)
@@ -55,6 +58,26 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.write_simulation_pair is not None:
+        try:
+            write_simulation_pair(
+                args.write_simulation_pair,
+                calibration_digest=args.expected_calibration_sha256,
+                joint_mapping_digest=args.expected_joint_mapping_sha256,
+            )
+        except (OSError, PolicyStateTraceError, ValueError) as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        return 0
+
+    if args.output_jsonl is None or args.summary_json is None:
+        print(
+            "--bridge-status-jsonl requires --output-jsonl and "
+            "--summary-json",
+            file=sys.stderr,
+        )
+        return 2
+    assert args.bridge_status_jsonl is not None
     if args.summary_json.exists():
         print(
             f"refusing to overwrite summary: {args.summary_json}",

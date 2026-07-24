@@ -16,6 +16,7 @@ from g1_root_state_bridge.policy_state_trace import (
     PolicyStateTraceError,
     policy_state_from_status_record,
     write_policy_state_replay,
+    write_simulation_pair,
 )
 from g1_root_state_bridge.protocol import (
     REQUIRED_HEALTH_FLAGS,
@@ -291,3 +292,31 @@ def test_replay_fails_closed_without_a_complete_causal_fresh_window(
             expected_joint_mapping_digest=JOINT_MAPPING_DIGEST,
         )
     assert not output.exists()
+
+
+def test_simulation_pair_contains_independent_direct_and_wire_state(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "pair.jsonl"
+
+    write_simulation_pair(
+        output,
+        calibration_digest=CALIBRATION_DIGEST,
+        joint_mapping_digest=JOINT_MAPPING_DIGEST,
+    )
+
+    records = [
+        json.loads(line)
+        for line in output.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(records) == 2
+    assert [record["sequence"] for record in records] == [101, 102]
+    assert all(record["schema"] == "g1_policy_state_replay_v1" for record in records)
+    assert all("payload_hex" in record for record in records)
+    assert all("direct_state" in record for record in records)
+    for record in records:
+        direct = record["direct_state"]
+        assert direct["sequence"] == record["sequence"]
+        assert direct["estimate_time_ns"] == record["estimate_time_ns"]
+        assert len(direct["joint_position"]) == 29
+        assert len(bytes.fromhex(record["payload_hex"])) == 440

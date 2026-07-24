@@ -15,6 +15,7 @@ from g1_root_state_bridge.joint_contract import (
 )
 from g1_root_state_bridge.policy_state_protocol import (
     G1PolicyStatePacketV1,
+    PolicyStateHealth,
     PolicyStateProtocolError,
     build_policy_state_v1,
     deserialize_policy_state_v1,
@@ -70,6 +71,96 @@ class ReplayConversionReport:
 
     def to_json_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+def _direct_state(packet: G1PolicyStatePacketV1) -> dict[str, object]:
+    return {
+        "sequence": packet.sequence,
+        "source_epoch": packet.source_epoch,
+        "estimate_time_ns": packet.estimate_time_ns,
+        "publish_time_ns": packet.publish_time_ns,
+        "correction_time_ns": packet.correction_time_ns,
+        "joint_time_ns": packet.joint_time_ns,
+        "joint_sync_gap_ns": packet.joint_sync_gap_ns,
+        "health_flags": int(packet.health_flags),
+        "position": list(packet.position),
+        "quaternion_wxyz": list(packet.quaternion_wxyz),
+        "linear_velocity": list(packet.linear_velocity),
+        "angular_velocity": list(packet.angular_velocity),
+        "covariance_diagonal": list(packet.covariance_diagonal),
+        "joint_position": list(packet.joint_position),
+        "joint_velocity": list(packet.joint_velocity),
+    }
+
+
+def write_simulation_pair(
+    output_path: Path,
+    *,
+    calibration_digest: bytes,
+    joint_mapping_digest: bytes,
+) -> None:
+    """Write two distinguishable direct-plus-wire states for parity tests."""
+
+    if len(calibration_digest) != 32 or len(joint_mapping_digest) != 32:
+        raise PolicyStateTraceError(
+            "simulation-pair digests must contain 32 bytes"
+        )
+    base_ns = 1_700_000_000_000_000_000
+    packets = []
+    for tick, sequence in enumerate((101, 102)):
+        query_time_ns = base_ns + tick * 20_000_000
+        estimate_time_ns = query_time_ns - 2_000_000
+        packet = G1PolicyStatePacketV1(
+            sequence=sequence,
+            source_epoch=7,
+            estimate_time_ns=estimate_time_ns,
+            publish_time_ns=query_time_ns - 1_000_000,
+            correction_time_ns=query_time_ns - 100_000_000,
+            joint_time_ns=estimate_time_ns + 250_000,
+            joint_sync_gap_ns=250_000,
+            health_flags=PolicyStateHealth(0xFF),
+            position=(0.001 * tick, -0.002 * tick, 0.73 + 0.001 * tick),
+            quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+            linear_velocity=(0.01 * tick, -0.02 * tick, 0.0),
+            angular_velocity=(0.001, 0.002, 0.003 + 0.001 * tick),
+            covariance_diagonal=(0.01,) * 6,
+            joint_position=tuple(
+                (index - 14) / 100.0 + tick / 1000.0
+                for index in range(29)
+            ),
+            joint_velocity=tuple(
+                (14 - index) / 1000.0 + tick / 10000.0
+                for index in range(29)
+            ),
+            calibration_digest=calibration_digest,
+            joint_mapping_digest=joint_mapping_digest,
+        )
+        payload = serialize_policy_state_v1(packet)
+        packets.append((tick, query_time_ns, packet, payload))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("x", encoding="utf-8") as output:
+        for tick, query_time_ns, packet, payload in packets:
+            output.write(
+                json.dumps(
+                    {
+                        "schema": "g1_policy_state_replay_v1",
+                        "tick": tick,
+                        "query_time_ns": query_time_ns,
+                        "sequence": packet.sequence,
+                        "source_epoch": packet.source_epoch,
+                        "estimate_time_ns": packet.estimate_time_ns,
+                        "publish_time_ns": packet.publish_time_ns,
+                        "correction_time_ns": packet.correction_time_ns,
+                        "joint_time_ns": packet.joint_time_ns,
+                        "payload_hex": payload.hex(),
+                        "direct_state": _direct_state(packet),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
 
 
 def _finite_29(value: object, name: str) -> tuple[float, ...]:
