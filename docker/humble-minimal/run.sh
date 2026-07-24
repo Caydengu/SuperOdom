@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-Usage: run.sh --data-dir PATH --output-dir PATH [--rmw cyclonedds|fastrtps] [--ros-domain-id 0..232] [--network-interface IFACE] [--container-name NAME] [--dry-run] -- COMMAND...
+Usage: run.sh --data-dir PATH --output-dir PATH [--rmw cyclonedds|fastrtps] [--ros-domain-id 0..232] [--network-interface IFACE] [--container-name NAME] [--cpuset-cpus LIST] [--dry-run] -- COMMAND...
 EOF
 }
 
@@ -13,6 +13,7 @@ rmw="cyclonedds"
 ros_domain_id=0
 container_name=""
 network_interface=""
+cpuset_cpus=""
 dry_run=false
 
 while (( $# )); do
@@ -45,6 +46,11 @@ while (( $# )); do
     --network-interface)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       network_interface=$2
+      shift 2
+      ;;
+    --cpuset-cpus)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      cpuset_cpus=$2
       shift 2
       ;;
     --dry-run)
@@ -83,6 +89,11 @@ if [[ -n "$container_name" && ! "$container_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*
   echo "Container name must use Docker-compatible letters, digits, underscores, periods, or dashes" >&2
   exit 2
 fi
+if [[ -n "$cpuset_cpus" &&
+      ! "$cpuset_cpus" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]]; then
+  echo "CPU set must be a Docker-compatible CPU list" >&2
+  exit 2
+fi
 
 if [[ -n "$network_interface" ]]; then
   if [[ ! "$network_interface" =~ ^[A-Za-z0-9_.:-]+$ ]] || [[ ! -d "/sys/class/net/$network_interface" ]]; then
@@ -110,6 +121,9 @@ docker_command=(
 )
 if [[ -n "$container_name" ]]; then
   docker_command+=(--name "$container_name")
+fi
+if [[ -n "$cpuset_cpus" ]]; then
+  docker_command+=(--cpuset-cpus "$cpuset_cpus")
 fi
 docker_command+=(
   --network host

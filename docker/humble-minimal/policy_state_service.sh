@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat >&2 <<'EOF'
 Usage: policy_state_service.sh --network-interface IFACE --ros-domain-id ID
-       --output-dir PATH [--image IMAGE] [--dry-run]
+       --output-dir PATH [--image IMAGE] [--cpuset-cpus LIST] [--dry-run]
 
 Run the minimal, non-actuating SuperOdometry and atomic pelvis-state service.
 The G1 Livox driver and typed joint relay must already be running. This service
@@ -16,6 +16,7 @@ network_interface=""
 ros_domain_id=""
 output_dir=""
 image="${SUPERODOM_IMAGE:-tml/superodom-humble:h12-shadow-minimal}"
+cpuset_cpus=""
 dry_run=false
 
 while (( $# )); do
@@ -38,6 +39,11 @@ while (( $# )); do
     --image)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       image=$2
+      shift 2
+      ;;
+    --cpuset-cpus)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      cpuset_cpus=$2
       shift 2
       ;;
     --dry-run)
@@ -76,6 +82,11 @@ done
   echo "Image reference contains unsupported characters" >&2
   exit 2
 }
+[[ -z "$cpuset_cpus" ||
+   "$cpuset_cpus" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] || {
+  echo "--cpuset-cpus must be a Docker-compatible CPU list" >&2
+  exit 2
+}
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/../.." && pwd -P)"
@@ -98,7 +109,7 @@ mkdir -p "$output_dir/logs" "$output_dir/runtime-input"
 
 python3 - "$output_dir/service_identity.json" "$source_commit" \
   "$source_dirty" "$image" "$image_id" "$network_interface" \
-  "$ros_domain_id" <<'PY'
+  "$ros_domain_id" "$cpuset_cpus" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -112,6 +123,7 @@ record = {
     "image_id": sys.argv[5],
     "network_interface": sys.argv[6],
     "ros_domain_id": int(sys.argv[7]),
+    "cpuset_cpus": sys.argv[8] or None,
 }
 path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
@@ -123,6 +135,9 @@ wrapper_args=(
   --network-interface "$network_interface"
   --container-name h12-superodom-policy-state
 )
+if [[ -n "$cpuset_cpus" ]]; then
+  wrapper_args+=(--cpuset-cpus "$cpuset_cpus")
+fi
 if [[ "$dry_run" == true ]]; then
   wrapper_args+=(--dry-run)
 fi

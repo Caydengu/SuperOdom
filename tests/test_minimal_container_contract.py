@@ -113,6 +113,8 @@ def test_runtime_wrapper_drops_privilege_and_gpu_requirements(tmp_path: Path) ->
             "superodom-contract-test",
             "--network-interface",
             "lo",
+            "--cpuset-cpus",
+            "16-31",
             "--",
             "ros2",
             "pkg",
@@ -133,6 +135,7 @@ def test_runtime_wrapper_drops_privilege_and_gpu_requirements(tmp_path: Path) ->
     assert "--name superodom-contract-test" in command
     assert "CYCLONEDDS_URI=" in command
     assert "NetworkInterface\\ name=\\\"lo\\\"" in command
+    assert "--cpuset-cpus 16-31" in command
     assert "--privileged" not in command
     assert "--gpus" not in command
     assert "--runtime=nvidia" not in command

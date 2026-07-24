@@ -16,6 +16,7 @@ def test_policy_state_service_is_syntax_valid_and_recorder_free() -> None:
     assert "--network-interface" in source
     assert "--ros-domain-id" in source
     assert "--output-dir" in source
+    assert "--cpuset-cpus" in source
     assert "setsid ros2 launch super_odometry" in source
     assert "setsid ros2 run g1_root_state_bridge" in source
     assert "tcp://*:5576" in source
