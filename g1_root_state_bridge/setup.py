@@ -32,6 +32,8 @@ setup(
             "g1_root_state_bridge.optitrack_reference_cli:main",
             "g1-optitrack-clock-audit = "
             "g1_root_state_bridge.optitrack_clock_audit_cli:main",
+            "g1-policy-state-replay = "
+            "g1_root_state_bridge.policy_state_trace_cli:main",
         ],
     },
 )

@@ -29,6 +29,9 @@ from g1_root_state_bridge.joint_transport import (
     canonical_joint_mapping_digest,
     serialize_joint_packet,
 )
+from g1_root_state_bridge.policy_state_protocol import (
+    deserialize_policy_state_v1,
+)
 from g1_root_state_bridge.protocol import deserialize_root_state_v2
 
 
@@ -59,6 +62,8 @@ def test_typed_ros_and_udp_inputs_produce_one_strict_zmq_v2_packet(
     udp_port = _free_port(socket.SOCK_DGRAM)
     tcp_port = _free_port(socket.SOCK_STREAM)
     endpoint = f"tcp://127.0.0.1:{tcp_port}"
+    policy_tcp_port = _free_port(socket.SOCK_STREAM)
+    policy_endpoint = f"tcp://127.0.0.1:{policy_tcp_port}"
     replay_path = tmp_path / "live_packets.jsonl"
 
     rclpy.init()
@@ -67,6 +72,7 @@ def test_typed_ros_and_udp_inputs_produce_one_strict_zmq_v2_packet(
             Parameter("joint_bind_host", value="127.0.0.1"),
             Parameter("joint_bind_port", value=udp_port),
             Parameter("root_state_bind_endpoint", value=endpoint),
+            Parameter("policy_state_bind_endpoint", value=policy_endpoint),
             Parameter("max_joint_transport_age_ms", value=100.0),
             Parameter("max_joint_sync_gap_ms", value=20.0),
             Parameter("pending_state_timeout_ms", value=100.0),
@@ -116,6 +122,10 @@ def test_typed_ros_and_udp_inputs_produce_one_strict_zmq_v2_packet(
     subscriber.setsockopt(zmq.LINGER, 0)
     subscriber.setsockopt(zmq.SUBSCRIBE, b"")
     subscriber.connect(endpoint)
+    policy_subscriber = zmq_context.socket(zmq.SUB)
+    policy_subscriber.setsockopt(zmq.LINGER, 0)
+    policy_subscriber.setsockopt(zmq.SUBSCRIBE, b"")
+    policy_subscriber.connect(policy_endpoint)
     joint_sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     try:
@@ -208,16 +218,22 @@ def test_typed_ros_and_udp_inputs_produce_one_strict_zmq_v2_packet(
 
         poller = zmq.Poller()
         poller.register(subscriber, zmq.POLLIN)
+        poller.register(policy_subscriber, zmq.POLLIN)
         payloads: list[bytes] = []
+        policy_payloads: list[bytes] = []
 
-        def received_packet() -> bool:
+        def received_both_packets() -> bool:
             executor.spin_once(timeout_sec=0.005)
-            if subscriber in dict(poller.poll(timeout=0)):
+            ready = dict(poller.poll(timeout=0))
+            if subscriber in ready:
                 payloads.append(subscriber.recv())
-            return bool(payloads)
+            if policy_subscriber in ready:
+                policy_payloads.append(policy_subscriber.recv())
+            return bool(payloads) and bool(policy_payloads)
 
-        _spin_until(executor, received_packet, 2.0)
+        _spin_until(executor, received_both_packets, 2.0)
         packet = deserialize_root_state_v2(payloads[0])
+        policy_packet = deserialize_policy_state_v1(policy_payloads[0])
 
         assert packet.strictly_valid
         assert packet.sequence == 1
@@ -229,6 +245,17 @@ def test_typed_ros_and_udp_inputs_produce_one_strict_zmq_v2_packet(
         assert packet.correction_time_ns == estimate_ns - 1_000_000
         assert packet.calibration_digest == bridge._calibration_contract.digest
         assert packet.publish_time_ns >= packet.estimate_time_ns
+        assert policy_packet.sequence == packet.sequence
+        assert policy_packet.source_epoch == packet.source_epoch
+        assert policy_packet.estimate_time_ns == packet.estimate_time_ns
+        assert policy_packet.joint_time_ns == packet.joint_time_ns
+        assert policy_packet.joint_position == pytest.approx([0.0] * 29)
+        assert policy_packet.joint_velocity == pytest.approx([0.0] * 29)
+        assert (
+            policy_packet.joint_mapping_digest
+            == canonical_joint_mapping_digest()
+        )
+        assert policy_packet.strictly_valid
         records = [
             json.loads(line)
             for line in replay_path.read_text(encoding="utf-8").splitlines()
@@ -249,9 +276,17 @@ def test_typed_ros_and_udp_inputs_produce_one_strict_zmq_v2_packet(
             packet_records[0]["joint_mapping_digest_sha256"]
             == canonical_joint_mapping_digest().hex()
         )
+        assert (
+            bytes.fromhex(packet_records[0]["policy_state_payload_hex"])
+            == policy_payloads[0]
+        )
+        assert packet_records[0]["policy_state_packet_published"] is True
+        assert packet_records[0]["policy_state_transport"] == "tcp"
+        assert packet_records[0]["policy_state_port"] == 5576
     finally:
         joint_sender.close()
         subscriber.close(linger=0)
+        policy_subscriber.close(linger=0)
         zmq_context.term()
         executor.remove_node(harness)
         executor.remove_node(bridge)

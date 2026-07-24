@@ -41,7 +41,12 @@ REQUIRED_POLICY_STATE_HEALTH_FLAGS = PolicyStateHealth(0xFF)
 
 @dataclass(frozen=True)
 class G1PolicyStatePacketV1:
-    """One atomic pelvis and canonical 29-DOF joint-state sample."""
+    """One atomic pelvis and canonical 29-DOF joint-state sample.
+
+    Joint arrays are synchronized at ``estimate_time_ns``. ``joint_time_ns``
+    remains the nearest physical source-sample time used to quantify the
+    interpolation gap, matching ``RootStatePacketV2``.
+    """
 
     sequence: int
     source_epoch: int
@@ -153,9 +158,10 @@ def build_policy_state_v1(
     canonical = joints.canonicalized()
     if canonical.names != CANONICAL_G1_JOINT_NAMES:
         raise PolicyStateProtocolError("joint names are not canonical")
-    if canonical.stamp_ns != root.joint_time_ns:
+    if canonical.stamp_ns != root.estimate_time_ns:
         raise PolicyStateProtocolError(
-            "policy joints must be the exact root-FK joint sample"
+            "policy joints must be the exact synchronized root-FK sample "
+            "at estimate time"
         )
 
     packet = G1PolicyStatePacketV1(

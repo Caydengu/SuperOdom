@@ -46,6 +46,10 @@ from g1_root_state_bridge.joint_transport import (
 )
 from g1_root_state_bridge.joint_contract import TimedJointSample
 from g1_root_state_bridge.kinematics import PelvisKinematics
+from g1_root_state_bridge.policy_state_protocol import (
+    build_policy_state_v1,
+    serialize_policy_state_v1,
+)
 from g1_root_state_bridge.protocol import (
     RootStatePacketV2,
     serialize_root_state_v2,
@@ -134,6 +138,7 @@ class G1RootStateBridgeNode(Node):
         self.declare_parameter("joint_bind_host", "0.0.0.0")
         self.declare_parameter("joint_bind_port", 5576)
         self.declare_parameter("root_state_bind_endpoint", "tcp://*:5575")
+        self.declare_parameter("policy_state_bind_endpoint", "tcp://*:5576")
         self.declare_parameter("calibration_digest_sha256", "")
         self.declare_parameter("max_joint_transport_age_ms", 10.0)
         self.declare_parameter("max_joint_sync_gap_ms", 10.0)
@@ -187,6 +192,13 @@ class G1RootStateBridgeNode(Node):
         self._zmq_socket.setsockopt(zmq.SNDHWM, 1)
         endpoint = str(self.get_parameter("root_state_bind_endpoint").value)
         self._zmq_socket.bind(endpoint)
+        self._policy_state_socket = self._zmq_context.socket(zmq.PUB)
+        self._policy_state_socket.setsockopt(zmq.LINGER, 0)
+        self._policy_state_socket.setsockopt(zmq.SNDHWM, 1)
+        policy_endpoint = str(
+            self.get_parameter("policy_state_bind_endpoint").value
+        )
+        self._policy_state_socket.bind(policy_endpoint)
 
         replay_path = str(self.get_parameter("replay_jsonl_path").value)
         self._replay_file = None
@@ -226,7 +238,9 @@ class G1RootStateBridgeNode(Node):
         self._status_publisher = self.create_publisher(String, STATUS_TOPIC, reliable)
         self.create_timer(0.001, self._poll_joint_datagrams)
         self.get_logger().info(
-            f"G1 root bridge listening for joints on {joint_host}:{joint_port} and publishing {endpoint}"
+            "G1 root bridge listening for joints on "
+            f"{joint_host}:{joint_port} and publishing root {endpoint} "
+            f"plus policy state {policy_endpoint}"
         )
         if not self._digest_configured:
             self.get_logger().error(
@@ -489,10 +503,25 @@ class G1RootStateBridgeNode(Node):
         joint_sample: TimedJointSample,
     ) -> None:
         payload = serialize_root_state_v2(packet)
-        try:
-            self._zmq_socket.send(payload, flags=self._zmq.NOBLOCK)
-        except self._zmq.Again:
-            self._status("packet_dropped", reason="zmq_send_hwm", sequence=packet.sequence)
+        policy_packet = build_policy_state_v1(
+            packet,
+            joint_sample,
+            joint_mapping_digest=canonical_joint_mapping_digest(),
+        )
+        policy_payload = serialize_policy_state_v1(policy_packet)
+        root_sent = self._send_nonblocking(
+            socket=self._zmq_socket,
+            payload=payload,
+            drop_event="packet_dropped",
+            sequence=packet.sequence,
+        )
+        policy_sent = self._send_nonblocking(
+            socket=self._policy_state_socket,
+            payload=policy_payload,
+            drop_event="policy_state_packet_dropped",
+            sequence=packet.sequence,
+        )
+        if not root_sent:
             return
 
         message = Odometry()
@@ -526,6 +555,10 @@ class G1RootStateBridgeNode(Node):
             "packet_published",
             kind="packet",
             payload_hex=payload.hex(),
+            policy_state_payload_hex=policy_payload.hex(),
+            policy_state_packet_published=policy_sent,
+            policy_state_transport="tcp",
+            policy_state_port=5576,
             sequence=packet.sequence,
             source_epoch=packet.source_epoch,
             estimate_time_ns=packet.estimate_time_ns,
@@ -549,12 +582,32 @@ class G1RootStateBridgeNode(Node):
             calibration_digest_sha256=packet.calibration_digest.hex(),
         )
 
+    def _send_nonblocking(
+        self,
+        *,
+        socket: object,
+        payload: bytes,
+        drop_event: str,
+        sequence: int,
+    ) -> bool:
+        try:
+            socket.send(payload, flags=self._zmq.NOBLOCK)
+        except self._zmq.Again:
+            self._status(
+                drop_event,
+                reason="zmq_send_hwm",
+                sequence=sequence,
+            )
+            return False
+        return True
+
     def destroy_node(self) -> bool:
         if self._replay_file is not None:
             self._replay_file.close()
             self._replay_file = None
         self._joint_socket.close()
         self._zmq_socket.close(linger=0)
+        self._policy_state_socket.close(linger=0)
         self._zmq_context.term()
         return super().destroy_node()
 

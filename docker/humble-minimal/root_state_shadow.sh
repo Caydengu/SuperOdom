@@ -6,10 +6,12 @@ usage() {
 Usage: root_state_shadow.sh --output-dir PATH --trial-name NAME --network-interface IFACE --image IMAGE [--ros-domain-id 0..232] [--duration-sec N] [--dry-run]
 
 Run a bounded, non-actuating SuperOdometry-to-pelvis shadow. The external G1
-typed joint relay must already be sending UDP port 5576. SuperOdometry remains
-the sole /livox/lidar subscriber; the recorder captures only compact inputs,
-diagnostics, and pelvis outputs. The selected image must contain an installed
-zero-prediction reference configuration and g1_root_state_bridge package.
+typed joint relay must already be sending UDP port 5576. The bridge emits root
+state on TCP port 5575 and atomic root-plus-joint policy state on TCP port 5576.
+SuperOdometry remains the sole /livox/lidar subscriber; the recorder captures
+only compact inputs, diagnostics, and pelvis outputs. The selected image must
+contain an installed zero-prediction reference configuration and
+g1_root_state_bridge package.
 EOF
 }
 
@@ -237,6 +239,7 @@ launch_pid=$!
 setsid ros2 run g1_root_state_bridge g1-root-state-bridge --ros-args \
   -p replay_jsonl_path:=/output/data/bridge_status.jsonl \
   -p root_state_bind_endpoint:=tcp://*:5575 \
+  -p policy_state_bind_endpoint:=tcp://*:5576 \
   -p joint_bind_host:=0.0.0.0 \
   -p joint_bind_port:=5576 \
   > /output/logs/root_state_bridge.log 2>&1 &

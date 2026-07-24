@@ -74,7 +74,7 @@ def root_packet() -> RootStatePacketV2:
 def joint_sample(*, stamp_ns: int | None = None) -> TimedJointSample:
     root = root_packet()
     return TimedJointSample(
-        stamp_ns=root.joint_time_ns if stamp_ns is None else stamp_ns,
+        stamp_ns=root.estimate_time_ns if stamp_ns is None else stamp_ns,
         receipt_ns=root.publish_time_ns,
         names=CANONICAL_G1_JOINT_NAMES,
         position=tuple(index / 100 for index in range(29)),
@@ -153,16 +153,17 @@ def test_build_policy_state_uses_exact_fk_joint_sample() -> None:
     assert packet.joint_position == joints.position
     assert packet.joint_velocity == joints.velocity
     assert packet.health_flags == PolicyStateHealth(0xFF)
-    assert packet.joint_time_ns == joints.stamp_ns
+    assert packet.joint_time_ns == root.joint_time_ns
+    assert joints.stamp_ns == root.estimate_time_ns
 
 
-def test_build_policy_state_rejects_estimate_time_joint_substitution() -> None:
+def test_build_policy_state_rejects_representative_source_sample_substitution() -> None:
     root = root_packet()
-    wrong_sample = joint_sample(stamp_ns=root.estimate_time_ns)
+    wrong_sample = joint_sample(stamp_ns=root.joint_time_ns)
 
     with pytest.raises(
         PolicyStateProtocolError,
-        match="exact root-FK joint sample",
+        match="synchronized root-FK sample",
     ):
         build_policy_state_v1(
             root,

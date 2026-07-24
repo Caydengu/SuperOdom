@@ -24,6 +24,9 @@ def test_root_state_shadow_launches_bridge_and_records_only_compact_topics():
     source = SCRIPT.read_text(encoding="utf-8")
     assert "ros2 run g1_root_state_bridge g1-root-state-bridge" in source
     assert "replay_jsonl_path" in source
+    assert "policy_state_bind_endpoint:=tcp://*:5576" in source
+    assert "UDP port 5576" in source
+    assert "TCP port 5576" in source
     assert "/pelvis_state_estimation" in source
     assert "/pelvis_state_bridge/status" in source
     assert "/state_estimation_calibration" in source

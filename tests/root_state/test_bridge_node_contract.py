@@ -199,6 +199,12 @@ def test_bridge_is_an_ament_python_package_with_typed_ros_inputs() -> None:
     assert '"/state_estimation_health"' in node
     assert '"/state_estimation_calibration"' in node
     assert "serialize_root_state_v2" in node
+    assert "serialize_policy_state_v1" in node
+    assert '"policy_state_bind_endpoint", "tcp://*:5576"' in node
+    assert "self._policy_state_socket" in node
+    assert "policy_state_payload_hex" in node
+    assert "policy_state_packet_published" in node
+    assert "def _send_nonblocking(" in node
     assert "_latest_health_receipt_ns < observation.receipt_time_ns" in node
 
 
