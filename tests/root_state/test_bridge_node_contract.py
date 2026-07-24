@@ -208,6 +208,37 @@ def test_bridge_is_an_ament_python_package_with_typed_ros_inputs() -> None:
     assert "_latest_health_receipt_ns < observation.receipt_time_ns" in node
 
 
+def test_bridge_default_path_is_recorder_free_with_compact_heartbeat() -> None:
+    node = _read("g1_root_state_bridge/g1_root_state_bridge/bridge_node.py")
+    assert 'self.declare_parameter("replay_jsonl_path", "")' in node
+    assert "if replay_path:" in node
+    assert "self._replay_file = None" in node
+    assert "self._zmq_socket.setsockopt(zmq.SNDHWM, 1)" in node
+    assert "self._policy_state_socket.setsockopt(zmq.SNDHWM, 1)" in node
+    assert "self.create_timer(1.0, self._publish_heartbeat)" in node
+    assert "self._emit_packet_diagnostics = self._replay_file is not None" in node
+
+    heartbeat = node.split(
+        "def _publish_heartbeat",
+        maxsplit=1,
+    )[1].split("def _on_calibration", maxsplit=1)[0]
+    for counter in (
+        "packets_built",
+        "root_packets_sent",
+        "policy_packets_sent",
+        "root_packets_dropped",
+        "policy_packets_dropped",
+    ):
+        assert counter in heartbeat
+    for forbidden in (
+        "payload_hex",
+        "joint_position",
+        "joint_velocity",
+        "quaternion_wxyz",
+    ):
+        assert forbidden not in heartbeat
+
+
 def test_bridge_source_has_no_raw_cloud_or_latest_tf_path() -> None:
     node = _read("g1_root_state_bridge/g1_root_state_bridge/bridge_node.py").lower()
     for forbidden in (

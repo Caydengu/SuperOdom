@@ -278,3 +278,30 @@ The next gate must measure, rather than assume:
 
 Do not connect `/state_estimation` to root FK, the elevation mapper, the 24 by
 16 policy adapter, or the policy until the dynamic pose and root-FK gates pass.
+
+## Recorder-free policy-state service
+
+For policy co-load and fixed-rate shadow work, use the dedicated foreground
+service instead of `root_state_shadow.sh`:
+
+```bash
+docker/humble-minimal/policy_state_service.sh \
+  --network-interface <robot-facing-interface> \
+  --ros-domain-id 42 \
+  --output-dir /move/u/caydengu/superodom_outputs/<new-service-run> \
+  --image tml/superodom-humble:h12-shadow-minimal
+```
+
+This path starts exactly one SuperOdometry launch tree and one
+`g1_root_state_bridge` process. It does not start a ROS bag, raw-cloud reader,
+full-packet JSONL trace, or policy. Readiness is based on two advancing,
+strictly valid, same-epoch `HSPOLI01` packets—not merely an open TCP port.
+
+The bridge's default empty replay path disables per-packet array and payload
+serialization. It publishes a compact one-hertz heartbeat containing only
+counters, the latest sequence/epoch, pending depth, and calibration readiness.
+The service itself appends a bounded five-second process heartbeat to
+`service_status.jsonl`, writes exact source/image/config identities, and writes
+`stop_receipt.json` after process-group cleanup. The older bounded diagnostic
+shadow retains full packet evidence by supplying a non-empty replay path; that
+diagnostic mode is not the co-load topology.

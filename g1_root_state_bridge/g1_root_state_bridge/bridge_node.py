@@ -206,6 +206,14 @@ class G1RootStateBridgeNode(Node):
             path = Path(replay_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             self._replay_file = path.open("x", encoding="utf-8", buffering=1)
+        self._emit_packet_diagnostics = self._replay_file is not None
+        self._packets_built = 0
+        self._root_packets_sent = 0
+        self._policy_packets_sent = 0
+        self._root_packets_dropped = 0
+        self._policy_packets_dropped = 0
+        self._last_packet_sequence: int | None = None
+        self._last_source_epoch: int | None = None
 
         reliable = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -237,6 +245,7 @@ class G1RootStateBridgeNode(Node):
         self._pelvis_publisher = self.create_publisher(Odometry, PELVIS_TOPIC, reliable)
         self._status_publisher = self.create_publisher(String, STATUS_TOPIC, reliable)
         self.create_timer(0.001, self._poll_joint_datagrams)
+        self.create_timer(1.0, self._publish_heartbeat)
         self.get_logger().info(
             "G1 root bridge listening for joints on "
             f"{joint_host}:{joint_port} and publishing root {endpoint} "
@@ -268,6 +277,20 @@ class G1RootStateBridgeNode(Node):
         self._status_publisher.publish(message)
         if self._replay_file is not None:
             self._replay_file.write(encoded + "\n")
+
+    def _publish_heartbeat(self) -> None:
+        self._status(
+            "heartbeat",
+            packets_built=self._packets_built,
+            root_packets_sent=self._root_packets_sent,
+            policy_packets_sent=self._policy_packets_sent,
+            root_packets_dropped=self._root_packets_dropped,
+            policy_packets_dropped=self._policy_packets_dropped,
+            last_sequence=self._last_packet_sequence,
+            last_source_epoch=self._last_source_epoch,
+            pending_estimates=len(self._pending),
+            calibration_ready=self._core is not None,
+        )
 
     def _on_calibration(self, message: StateEstimationCalibration) -> None:
         reset_id = int(message.reset_id)
@@ -509,18 +532,29 @@ class G1RootStateBridgeNode(Node):
             joint_mapping_digest=canonical_joint_mapping_digest(),
         )
         policy_payload = serialize_policy_state_v1(policy_packet)
+        self._packets_built += 1
+        self._last_packet_sequence = packet.sequence
+        self._last_source_epoch = packet.source_epoch
         root_sent = self._send_nonblocking(
             socket=self._zmq_socket,
             payload=payload,
             drop_event="packet_dropped",
             sequence=packet.sequence,
         )
+        if root_sent:
+            self._root_packets_sent += 1
+        else:
+            self._root_packets_dropped += 1
         policy_sent = self._send_nonblocking(
             socket=self._policy_state_socket,
             payload=policy_payload,
             drop_event="policy_state_packet_dropped",
             sequence=packet.sequence,
         )
+        if policy_sent:
+            self._policy_packets_sent += 1
+        else:
+            self._policy_packets_dropped += 1
         if not root_sent:
             return
 
@@ -551,36 +585,37 @@ class G1RootStateBridgeNode(Node):
         for index, value in zip((0, 7, 14, 21, 28, 35), packet.covariance_diagonal, strict=True):
             message.pose.covariance[index] = value
         self._pelvis_publisher.publish(message)
-        self._status(
-            "packet_published",
-            kind="packet",
-            payload_hex=payload.hex(),
-            policy_state_payload_hex=policy_payload.hex(),
-            policy_state_packet_published=policy_sent,
-            policy_state_transport="tcp",
-            policy_state_port=5576,
-            sequence=packet.sequence,
-            source_epoch=packet.source_epoch,
-            estimate_time_ns=packet.estimate_time_ns,
-            publish_time_ns=packet.publish_time_ns,
-            correction_time_ns=packet.correction_time_ns,
-            joint_time_ns=packet.joint_time_ns,
-            joint_sync_gap_ns=packet.joint_sync_gap_ns,
-            joint_names=joint_sample.names,
-            joint_position=joint_sample.position,
-            joint_velocity=joint_sample.velocity,
-            joint_mapping_digest_sha256=(
-                canonical_joint_mapping_digest().hex()
-            ),
-            health_flags=int(packet.health_flags),
-            strictly_valid=packet.strictly_valid,
-            position=packet.position,
-            quaternion_wxyz=packet.quaternion_wxyz,
-            linear_velocity_world=packet.linear_velocity,
-            angular_velocity_world=packet.angular_velocity,
-            estimator_uncertainty_scores=self._last_stats_uncertainty,
-            calibration_digest_sha256=packet.calibration_digest.hex(),
-        )
+        if self._emit_packet_diagnostics:
+            self._status(
+                "packet_published",
+                kind="packet",
+                payload_hex=payload.hex(),
+                policy_state_payload_hex=policy_payload.hex(),
+                policy_state_packet_published=policy_sent,
+                policy_state_transport="tcp",
+                policy_state_port=5576,
+                sequence=packet.sequence,
+                source_epoch=packet.source_epoch,
+                estimate_time_ns=packet.estimate_time_ns,
+                publish_time_ns=packet.publish_time_ns,
+                correction_time_ns=packet.correction_time_ns,
+                joint_time_ns=packet.joint_time_ns,
+                joint_sync_gap_ns=packet.joint_sync_gap_ns,
+                joint_names=joint_sample.names,
+                joint_position=joint_sample.position,
+                joint_velocity=joint_sample.velocity,
+                joint_mapping_digest_sha256=(
+                    canonical_joint_mapping_digest().hex()
+                ),
+                health_flags=int(packet.health_flags),
+                strictly_valid=packet.strictly_valid,
+                position=packet.position,
+                quaternion_wxyz=packet.quaternion_wxyz,
+                linear_velocity_world=packet.linear_velocity,
+                angular_velocity_world=packet.angular_velocity,
+                estimator_uncertainty_scores=self._last_stats_uncertainty,
+                calibration_digest_sha256=packet.calibration_digest.hex(),
+            )
 
     def _send_nonblocking(
         self,
