@@ -4,11 +4,14 @@ set -euo pipefail
 usage() {
   cat >&2 <<'EOF'
 Usage: policy_state_service.sh --network-interface IFACE --ros-domain-id ID
-       --output-dir PATH [--image IMAGE] [--cpuset-cpus LIST] [--dry-run]
+       --output-dir PATH [--livox-config PATH] [--image IMAGE]
+       [--cpuset-cpus LIST] [--dry-run]
 
 Run the minimal, non-actuating SuperOdometry and atomic pelvis-state service.
-The G1 Livox driver and typed joint relay must already be running. This service
-does not record sensor streams and owns only the two process groups it starts.
+When --livox-config is provided, this service receives the Mid-360 directly on
+the offboard host and owns that driver. Otherwise an external Livox ROS
+publisher must already be running. The typed joint relay must already be
+running. This service records no sensor streams.
 EOF
 }
 
@@ -17,6 +20,7 @@ ros_domain_id=""
 output_dir=""
 image="${SUPERODOM_IMAGE:-tml/superodom-humble:h12-shadow-minimal}"
 cpuset_cpus=""
+livox_config=""
 dry_run=false
 
 while (( $# )); do
@@ -44,6 +48,11 @@ while (( $# )); do
     --cpuset-cpus)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       cpuset_cpus=$2
+      shift 2
+      ;;
+    --livox-config)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      livox_config=$2
       shift 2
       ;;
     --dry-run)
@@ -87,6 +96,13 @@ done
   echo "--cpuset-cpus must be a Docker-compatible CPU list" >&2
   exit 2
 }
+if [[ -n "$livox_config" ]]; then
+  [[ "$livox_config" == /* && -f "$livox_config" ]] || {
+    echo "--livox-config must name an existing absolute file" >&2
+    exit 2
+  }
+  livox_config="$(cd "$(dirname "$livox_config")" && pwd -P)/$(basename "$livox_config")"
+fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/../.." && pwd -P)"
@@ -106,10 +122,19 @@ if find "$output_dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
   exit 2
 fi
 mkdir -p "$output_dir/logs" "$output_dir/runtime-input"
+livox_config_sha256=""
+livox_source="external_ros"
+if [[ -n "$livox_config" ]]; then
+  livox_config_sha256="$(sha256sum "$livox_config" | awk '{print $1}')"
+  cp -- "$livox_config" "$output_dir/runtime-input/livox_mid360.json"
+  chmod a-w "$output_dir/runtime-input/livox_mid360.json"
+  livox_source="oslo_direct"
+fi
 
 python3 - "$output_dir/service_identity.json" "$source_commit" \
   "$source_dirty" "$image" "$image_id" "$network_interface" \
-  "$ros_domain_id" "$cpuset_cpus" <<'PY'
+  "$ros_domain_id" "$cpuset_cpus" "$livox_source" \
+  "$livox_config_sha256" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -124,6 +149,8 @@ record = {
     "network_interface": sys.argv[6],
     "ros_domain_id": int(sys.argv[7]),
     "cpuset_cpus": sys.argv[8] or None,
+    "livox_source": sys.argv[9],
+    "livox_config_sha256": sys.argv[10] or None,
 }
 path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PY
@@ -145,8 +172,11 @@ fi
 container_script='set -euo pipefail
 source_commit=$1
 image_id=$2
+direct_livox=$3
+livox_config_sha256=$4
 launch_pid=""
 bridge_pid=""
+livox_pid=""
 cleaned=false
 service_status_max_lines=10000
 status_lines=0
@@ -200,8 +230,9 @@ cleanup() {
   cleaned=true
   stop_process "$bridge_pid" policy-state-bridge
   stop_process "$launch_pid" superodometry-launch
-  printf "{\"schema\":\"policy_state_service_stop_v1\",\"realtime_ns\":%s,\"exit_status\":%s,\"launch_pid\":%s,\"bridge_pid\":%s}\n" \
-    "$(date +%s%N)" "$status" "${launch_pid:-0}" "${bridge_pid:-0}" \
+  stop_process "$livox_pid" livox-driver
+  printf "{\"schema\":\"policy_state_service_stop_v1\",\"realtime_ns\":%s,\"exit_status\":%s,\"launch_pid\":%s,\"bridge_pid\":%s,\"livox_pid\":%s}\n" \
+    "$(date +%s%N)" "$status" "${launch_pid:-0}" "${bridge_pid:-0}" "${livox_pid:-0}" \
     > /output/stop_receipt.json
 }
 trap cleanup EXIT
@@ -239,8 +270,144 @@ publisher_count() {
     | head -n 1
 }
 
+if [[ "$direct_livox" == true ]]; then
+  [[ -f /data/livox_mid360.json ]] || {
+    echo "Direct Livox configuration is missing" >&2
+    exit 30
+  }
+  actual_livox_sha256="$(sha256sum /data/livox_mid360.json | awk "{print \$1}")"
+  [[ "$actual_livox_sha256" == "$livox_config_sha256" ]] || {
+    echo "Direct Livox configuration identity mismatch" >&2
+    exit 30
+  }
+  append_status livox_starting
+  setsid ros2 run livox_ros_driver2 livox_ros_driver2_node --ros-args \
+    -r __node:=h12_livox_oslo_direct \
+    -p xfer_format:=1 \
+    -p multi_topic:=0 \
+    -p data_src:=0 \
+    -p publish_freq:=10.0 \
+    -p output_data_type:=0 \
+    -p frame_id:=livox_frame \
+    -p user_config_path:=/data/livox_mid360.json \
+    > /output/logs/livox_driver.log 2>&1 &
+  livox_pid=$!
+fi
+
 wait_for_type /livox/lidar livox_ros_driver2/msg/CustomMsg
 wait_for_type /livox/imu sensor_msgs/msg/Imu
+if [[ "$direct_livox" == true ]]; then
+  python3 - <<'"'"'PY'"'"'
+import json
+import math
+import time
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import (
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
+from sensor_msgs.msg import Imu
+
+
+class InputProbe(Node):
+    def __init__(self) -> None:
+        super().__init__("h12_livox_oslo_input_preflight")
+        self.receipt_monotonic_ns: list[int] = []
+        self.timestamp_error_ns: list[int] = []
+        self.header_ns: list[int] = []
+        qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=64,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
+        self.create_subscription(Imu, "/livox/imu", self._on_imu, qos)
+
+    def _on_imu(self, message: Imu) -> None:
+        receipt_realtime_ns = time.time_ns()
+        self.receipt_monotonic_ns.append(time.monotonic_ns())
+        header_ns = (
+            int(message.header.stamp.sec) * 1_000_000_000
+            + int(message.header.stamp.nanosec)
+        )
+        self.header_ns.append(header_ns)
+        self.timestamp_error_ns.append(receipt_realtime_ns - header_ns)
+
+
+def percentile(values: list[float], probability: float) -> float:
+    ordered = sorted(values)
+    index = min(
+        len(ordered) - 1,
+        max(0, math.ceil(probability * len(ordered)) - 1),
+    )
+    return ordered[index]
+
+
+rclpy.init()
+node = InputProbe()
+deadline = time.monotonic() + 5.0
+try:
+    while len(node.receipt_monotonic_ns) < 500 and time.monotonic() < deadline:
+        rclpy.spin_once(node, timeout_sec=0.02)
+finally:
+    node.destroy_node()
+    rclpy.shutdown()
+
+gaps_ms = [
+    (current - previous) / 1_000_000.0
+    for previous, current in zip(
+        node.receipt_monotonic_ns,
+        node.receipt_monotonic_ns[1:],
+    )
+]
+timestamp_error_abs_ms = [
+    abs(value) / 1_000_000.0 for value in node.timestamp_error_ns
+]
+header_monotonic = all(
+    current > previous
+    for previous, current in zip(node.header_ns, node.header_ns[1:])
+)
+metrics_available = (
+    len(node.receipt_monotonic_ns) >= 500
+    and bool(gaps_ms)
+    and bool(timestamp_error_abs_ms)
+)
+record = {
+    "schema": "livox_input_preflight_v1",
+    "source": "oslo_direct",
+    "samples": len(node.receipt_monotonic_ns),
+    "header_monotonic": header_monotonic,
+    "gap_p95_ms": percentile(gaps_ms, 0.95) if gaps_ms else None,
+    "gap_p99_ms": percentile(gaps_ms, 0.99) if gaps_ms else None,
+    "gap_max_ms": max(gaps_ms) if gaps_ms else None,
+    "timestamp_error_abs_p95_ms": (
+        percentile(timestamp_error_abs_ms, 0.95)
+        if timestamp_error_abs_ms
+        else None
+    ),
+    "timestamp_error_abs_max_ms": (
+        max(timestamp_error_abs_ms)
+        if timestamp_error_abs_ms
+        else None
+    ),
+}
+record["valid"] = bool(
+    metrics_available
+    and header_monotonic
+    and record["gap_p99_ms"] <= 8.0
+    and record["gap_max_ms"] <= 12.0
+    and record["timestamp_error_abs_p95_ms"] <= 5.0
+    and record["timestamp_error_abs_max_ms"] <= 10.0
+)
+with open("/output/livox_input_preflight.json", "x", encoding="utf-8") as stream:
+    json.dump(record, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+if not record["valid"]:
+    raise SystemExit(f"direct Livox input preflight failed: {record}")
+PY
+fi
 pre_subscribers="$(subscription_count /livox/lidar)"
 [[ "$pre_subscribers" == "0" ]] || {
   echo "Expected no pre-existing /livox/lidar subscribers, found $pre_subscribers" >&2
@@ -356,6 +523,12 @@ PY
 
 append_status ready
 while true; do
+  if [[ "$direct_livox" == true ]]; then
+    kill -0 -- "-$livox_pid" 2>/dev/null || {
+      append_status livox_exited
+      exit 42
+    }
+  fi
   kill -0 -- "-$launch_pid" 2>/dev/null || {
     append_status superodometry_exited
     exit 40
@@ -373,4 +546,6 @@ done
 '
 
 SUPERODOM_IMAGE="$image" exec "$run_wrapper" "${wrapper_args[@]}" -- \
-  bash -c "$container_script" policy-state-service "$source_commit" "$image_id"
+  bash -c "$container_script" policy-state-service "$source_commit" "$image_id" \
+  "$([[ -n "$livox_config" ]] && echo true || echo false)" \
+  "$livox_config_sha256"
