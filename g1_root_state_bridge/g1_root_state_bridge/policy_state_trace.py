@@ -98,16 +98,22 @@ def write_simulation_pair(
     *,
     calibration_digest: bytes,
     joint_mapping_digest: bytes,
+    samples: int = 2,
 ) -> None:
-    """Write two distinguishable direct-plus-wire states for parity tests."""
+    """Write deterministic direct-plus-wire states for parity/load tests."""
 
     if len(calibration_digest) != 32 or len(joint_mapping_digest) != 32:
         raise PolicyStateTraceError(
             "simulation-pair digests must contain 32 bytes"
         )
+    if not isinstance(samples, int) or samples < 2:
+        raise PolicyStateTraceError(
+            "simulation fixture requires at least two samples"
+        )
     base_ns = 1_700_000_000_000_000_000
     packets = []
-    for tick, sequence in enumerate((101, 102)):
+    for tick in range(samples):
+        sequence = 101 + tick
         query_time_ns = base_ns + tick * 20_000_000
         estimate_time_ns = query_time_ns - 2_000_000
         packet = G1PolicyStatePacketV1(
@@ -119,17 +125,29 @@ def write_simulation_pair(
             joint_time_ns=estimate_time_ns + 250_000,
             joint_sync_gap_ns=250_000,
             health_flags=PolicyStateHealth(0xFF),
-            position=(0.001 * tick, -0.002 * tick, 0.73 + 0.001 * tick),
+            position=(
+                0.0001 * tick,
+                -0.0001 * tick,
+                0.73 + 0.0001 * (tick % 10),
+            ),
             quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
-            linear_velocity=(0.01 * tick, -0.02 * tick, 0.0),
-            angular_velocity=(0.001, 0.002, 0.003 + 0.001 * tick),
+            linear_velocity=(
+                0.001 * (tick % 10),
+                -0.001 * (tick % 10),
+                0.0,
+            ),
+            angular_velocity=(
+                0.001,
+                0.002,
+                0.003 + 0.0001 * (tick % 10),
+            ),
             covariance_diagonal=(0.01,) * 6,
             joint_position=tuple(
-                (index - 14) / 100.0 + tick / 1000.0
+                (index - 14) / 100.0 + tick / 10000.0
                 for index in range(29)
             ),
             joint_velocity=tuple(
-                (14 - index) / 1000.0 + tick / 10000.0
+                (14 - index) / 1000.0 + (tick % 10) / 10000.0
                 for index in range(29)
             ),
             calibration_digest=calibration_digest,

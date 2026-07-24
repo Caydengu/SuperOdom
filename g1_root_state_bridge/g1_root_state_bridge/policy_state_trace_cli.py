@@ -41,6 +41,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-jsonl", type=Path)
     parser.add_argument("--summary-json", type=Path)
     parser.add_argument("--samples", type=int, default=522)
+    parser.add_argument("--simulation-samples", type=int, default=2)
     parser.add_argument("--rate-hz", type=float, default=50.0)
     parser.add_argument("--warmup-seconds", type=float, default=30.0)
     parser.add_argument(
@@ -64,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.write_simulation_pair,
                 calibration_digest=args.expected_calibration_sha256,
                 joint_mapping_digest=args.expected_joint_mapping_sha256,
+                samples=args.simulation_samples,
             )
         except (OSError, PolicyStateTraceError, ValueError) as error:
             print(str(error), file=sys.stderr)

@@ -320,3 +320,28 @@ def test_simulation_pair_contains_independent_direct_and_wire_state(
         assert direct["estimate_time_ns"] == record["estimate_time_ns"]
         assert len(direct["joint_position"]) == 29
         assert len(bytes.fromhex(record["payload_hex"])) == 440
+
+
+def test_simulation_fixture_can_cover_a_full_policy_benchmark(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "long.jsonl"
+
+    write_simulation_pair(
+        output,
+        calibration_digest=CALIBRATION_DIGEST,
+        joint_mapping_digest=JOINT_MAPPING_DIGEST,
+        samples=522,
+    )
+
+    records = [
+        json.loads(line)
+        for line in output.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(records) == 522
+    assert records[0]["sequence"] == 101
+    assert records[-1]["sequence"] == 622
+    assert (
+        records[-1]["query_time_ns"] - records[0]["query_time_ns"]
+        == 521 * 20_000_000
+    )
