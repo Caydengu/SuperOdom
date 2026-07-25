@@ -457,7 +457,7 @@ class G1RootStateBridgeNode(Node):
         self._pending.append(observation)
         self._drain_pending(receipt_ns)
 
-    def _poll_joint_datagrams(self) -> None:
+    def _receive_joint_datagrams(self) -> None:
         for _ in range(256):
             try:
                 payload, _source = self._joint_socket.recvfrom(2048)
@@ -477,9 +477,23 @@ class G1RootStateBridgeNode(Node):
                     self._core.append_joint(sample)
                 except ValueError as error:
                     self._status("joint_rejected", reason=str(error))
-        self._drain_pending(time.time_ns())
 
-    def _drain_pending(self, now_ns: int) -> None:
+    def _poll_joint_datagrams(self) -> None:
+        self._receive_joint_datagrams()
+        self._drain_pending(time.time_ns(), receive_joints=False)
+
+    def _drain_pending(
+        self,
+        now_ns: int,
+        *,
+        receive_joints: bool = True,
+    ) -> None:
+        if receive_joints:
+            # The ROS executor can be busy processing estimator callbacks long
+            # enough to delay the nominal 1 ms UDP timer.  Drain the socket at
+            # every qualification point so a queued bracket sample cannot be
+            # mistaken for a missing joint observation.
+            self._receive_joint_datagrams()
         if self._core is None:
             return
         while self._pending:

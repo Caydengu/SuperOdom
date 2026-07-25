@@ -239,6 +239,28 @@ def test_bridge_default_path_is_recorder_free_with_compact_heartbeat() -> None:
         assert forbidden not in heartbeat
 
 
+def test_bridge_drains_joint_socket_before_pending_estimate_qualification() -> None:
+    node = _read("g1_root_state_bridge/g1_root_state_bridge/bridge_node.py")
+    receiver = node.split(
+        "def _receive_joint_datagrams",
+        maxsplit=1,
+    )[1].split("def _poll_joint_datagrams", maxsplit=1)[0]
+    timer = node.split(
+        "def _poll_joint_datagrams",
+        maxsplit=1,
+    )[1].split("def _drain_pending", maxsplit=1)[0]
+    drain = node.split(
+        "def _drain_pending",
+        maxsplit=1,
+    )[1].split("def _publish_packet", maxsplit=1)[0]
+
+    assert "recvfrom(2048)" in receiver
+    assert "self._receive_joint_datagrams()" in timer
+    assert "receive_joints=False" in timer
+    assert "if receive_joints:" in drain
+    assert "self._receive_joint_datagrams()" in drain
+
+
 def test_bridge_source_has_no_raw_cloud_or_latest_tf_path() -> None:
     node = _read("g1_root_state_bridge/g1_root_state_bridge/bridge_node.py").lower()
     for forbidden in (
