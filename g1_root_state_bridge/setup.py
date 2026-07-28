@@ -34,6 +34,10 @@ setup(
             "g1_root_state_bridge.optitrack_clock_audit_cli:main",
             "g1-policy-state-replay = "
             "g1_root_state_bridge.policy_state_trace_cli:main",
+            "g1-dynamic-capture-relay = "
+            "g1_root_state_bridge.g1_dynamic_capture_relay:main",
+            "g1-dynamic-capture-recorder = "
+            "g1_root_state_bridge.g1_dynamic_capture_recorder:main",
         ],
     },
 )
