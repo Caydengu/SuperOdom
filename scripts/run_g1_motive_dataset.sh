@@ -162,6 +162,10 @@ echo "Staging read-only relay and NatNet SDK..."
 ssh -o BatchMode=yes "$robot_user@$robot_host" "mkdir -p '$remote_stage'"
 scp -q -r "$repo_dir/g1_root_state_bridge/g1_root_state_bridge" "$robot_user@$robot_host:$remote_stage/"
 scp -q -r "$robot_user@$robot_host:/home/unitree/G1_localization/mocap_utils" "$run_dir/runtime/"
+python3 "$script_dir/probe_g1_clock.py" \
+  --target "$robot_user@$robot_host" \
+  --output "$run_dir/clock_probe.json" \
+  >"$run_dir/logs/clock_probe.log" 2>&1
 
 echo "Starting all passive recorders for ${duration_sec}s..."
 python3 "$script_dir/record_natnet_reference.py" \
