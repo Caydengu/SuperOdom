@@ -20,7 +20,10 @@ from g1_root_state_bridge.joint_contract import (
     TimedJointSample,
 )
 from g1_root_state_bridge.kinematics import PelvisState
+from g1_root_state_bridge.odometry_health import OdometryHealthConfig
+from g1_root_state_bridge.orientation_fusion import OrientationFusionConfig
 from g1_root_state_bridge.protocol import REQUIRED_HEALTH_FLAGS, RootStateHealth
+from g1_root_state_bridge.root_imu_contract import TimedRootImuSample
 
 
 def _rot_x(angle: float) -> np.ndarray:
@@ -124,6 +127,8 @@ def _ready_core(
     allowed_digests: set[bytes] | None = None,
     max_correction_input_age_ns: int = 150_000_000,
     max_correction_age_ns: int = 250_000_000,
+    odometry_health_config: OdometryHealthConfig | None = None,
+    orientation_fusion_config: OrientationFusionConfig | None = None,
 ) -> BridgeCore:
     selected = _calibration() if calibration is None else calibration
     core = BridgeCore(
@@ -137,6 +142,8 @@ def _ready_core(
         max_correction_input_age_ns=max_correction_input_age_ns,
         max_correction_age_ns=max_correction_age_ns,
         max_health_age_ns=20_000_000,
+        odometry_health_config=odometry_health_config,
+        orientation_fusion_config=orientation_fusion_config,
     )
     core.append_joint(_joint(995_000_000, 10, -0.1))
     core.append_joint(_joint(1_006_000_000, 11, 0.1))
@@ -153,6 +160,65 @@ def _ready_core(
     )
     core.update_health(EstimatorHealthSample(receipt_time_ns=1_002_000_000, healthy=True))
     return core
+
+
+def _root_imu(stamp_ns: int, sequence: int) -> TimedRootImuSample:
+    return TimedRootImuSample(
+        stamp_ns=stamp_ns,
+        receipt_ns=stamp_ns + 1_000_000,
+        quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
+        angular_velocity=(0.0, 0.0, 0.4),
+        linear_acceleration=(0.0, 0.0, 9.81),
+        sequence=sequence,
+        source_epoch=5,
+    )
+
+
+def test_optional_root_imu_fusion_is_source_synchronized_and_explicitly_healthy() -> None:
+    core = _ready_core(orientation_fusion_config=OrientationFusionConfig())
+    core.append_root_imu(_root_imu(995_000_000, 1))
+    core.append_root_imu(_root_imu(1_005_000_000, 2))
+    packet = core.build_packet(_observation(), publish_time_ns=1_003_000_000)
+
+    assert packet.health_flags & RootStateHealth.ROOT_IMU_SYNC_VALID
+    assert packet.health_flags & RootStateHealth.ROOT_ORIENTATION_FUSED
+    assert packet.health_flags & RootStateHealth.ESTIMATOR_HEALTHY
+
+
+def test_required_root_imu_fusion_drops_packet_when_no_imu_bracket_exists() -> None:
+    core = _ready_core(orientation_fusion_config=OrientationFusionConfig())
+    with pytest.raises(BridgeCoreError, match="root IMU synchronization failed"):
+        core.build_packet(_observation(), publish_time_ns=1_003_000_000)
+
+
+def test_optional_odometry_gate_clears_estimator_health_until_plausible() -> None:
+    core = _ready_core(
+        odometry_health_config=OdometryHealthConfig(
+            window_ns=100_000_000,
+            max_planar_speed_mps=1.5,
+            recovery_hold_ns=0,
+        )
+    )
+
+    warming = core.build_packet(
+        _observation(), publish_time_ns=1_003_000_000
+    )
+    core.append_joint(_joint(1_095_000_000, 12, -0.1))
+    core.append_joint(_joint(1_106_000_000, 13, 0.1))
+    core.update_health(EstimatorHealthSample(receipt_time_ns=1_102_000_000, healthy=True))
+    implausible = core.build_packet(
+        _observation(
+            estimate_time_ns=1_100_000_000,
+            receipt_time_ns=1_101_000_000,
+            map_T_lidar=_transform(np.eye(3), (0.3, -0.4, 1.1)),
+        ),
+        publish_time_ns=1_103_000_000,
+    )
+
+    assert not (warming.health_flags & RootStateHealth.ESTIMATOR_HEALTHY)
+    assert core.last_odometry_health is not None
+    assert "planar_speed" in core.last_odometry_health.reason
+    assert not (implausible.health_flags & RootStateHealth.ESTIMATOR_HEALTHY)
 
 
 def test_normalizer_converts_raw_map_and_imu_origin_twist_to_gravity_lidar() -> None:

@@ -25,6 +25,11 @@ from g1_root_state_bridge.joint_transport import (
     canonical_joint_mapping_digest,
     serialize_joint_packet,
 )
+from g1_root_state_bridge.root_imu_transport import (
+    REQUIRED_ROOT_IMU_HEALTH_FLAGS,
+    RootImuPacketV1,
+    serialize_root_imu_packet,
+)
 
 
 class G1JointRelay:
@@ -45,6 +50,8 @@ class G1JointRelay:
         self.sent = 0
         self.rate_limited = 0
         self.invalid = 0
+        self.imu_sent = 0
+        self.imu_invalid = 0
         self.first_tick: int | None = None
         self.last_tick: int | None = None
         self.started_monotonic_ns = time.monotonic_ns()
@@ -82,6 +89,26 @@ class G1JointRelay:
             mapping_digest=canonical_joint_mapping_digest(),
         )
         self.socket.sendto(serialize_joint_packet(packet), self.target)
+        imu = getattr(message, "imu_state", None)
+        if imu is not None:
+            try:
+                quaternion = tuple(float(v) for v in imu.quaternion)
+                angular_velocity = tuple(float(v) for v in imu.gyroscope)
+                linear_acceleration = tuple(float(v) for v in imu.accelerometer)
+                imu_packet = RootImuPacketV1(
+                    source_epoch=self.source_epoch,
+                    sequence=self.sequence,
+                    stamp_ns=stamp_ns,
+                    source_tick=source_tick,
+                    health_flags=REQUIRED_ROOT_IMU_HEALTH_FLAGS,
+                    quaternion_wxyz=quaternion,
+                    angular_velocity=angular_velocity,
+                    linear_acceleration=linear_acceleration,
+                )
+                self.socket.sendto(serialize_root_imu_packet(imu_packet), self.target)
+                self.imu_sent += 1
+            except (AttributeError, TypeError, ValueError):
+                self.imu_invalid += 1
         if self.first_tick is None:
             self.first_tick = source_tick
         self.last_tick = source_tick
@@ -111,6 +138,8 @@ class G1JointRelay:
             "sent": self.sent,
             "rate_limited": self.rate_limited,
             "invalid": self.invalid,
+            "imu_sent": self.imu_sent,
+            "imu_invalid": self.imu_invalid,
             "first_tick": self.first_tick,
             "last_tick": self.last_tick,
             "elapsed_sec": elapsed_sec,

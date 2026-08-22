@@ -36,6 +36,8 @@ class RootStateHealth(IntFlag):
     CORRECTION_FRESH = 1 << 3
     CALIBRATION_VALID = 1 << 4
     CLOCK_VALID = 1 << 5
+    ROOT_IMU_SYNC_VALID = 1 << 6
+    ROOT_ORIENTATION_FUSED = 1 << 7
 
 
 REQUIRED_HEALTH_FLAGS = (
@@ -45,6 +47,12 @@ REQUIRED_HEALTH_FLAGS = (
     | RootStateHealth.CORRECTION_FRESH
     | RootStateHealth.CALIBRATION_VALID
     | RootStateHealth.CLOCK_VALID
+)
+
+REQUIRED_ROOT_FUSION_FLAGS = (
+    REQUIRED_HEALTH_FLAGS
+    | RootStateHealth.ROOT_IMU_SYNC_VALID
+    | RootStateHealth.ROOT_ORIENTATION_FUSED
 )
 
 

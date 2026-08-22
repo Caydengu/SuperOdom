@@ -35,7 +35,22 @@ from g1_root_state_bridge.kinematics import (
     _validated_transform,
     _validated_vector,
 )
+from g1_root_state_bridge.odometry_health import (
+    OdometryHealthConfig,
+    OdometryHealthGate,
+    OdometryHealthState,
+)
+from g1_root_state_bridge.orientation_fusion import (
+    OrientationFusionConfig,
+    OrientationFusionResult,
+    PelvisOrientationFusion,
+)
 from g1_root_state_bridge.protocol import RootStateHealth, RootStatePacketV2
+from g1_root_state_bridge.root_imu_buffer import (
+    RootImuBuffer,
+    RootImuSynchronizationError,
+)
+from g1_root_state_bridge.root_imu_contract import TimedRootImuSample
 
 
 ESTIMATOR_SEMANTICS_VERSION = "superodom-state-estimation-raw-v1"
@@ -301,6 +316,9 @@ class BridgeCore:
         max_correction_age_ns: int,
         max_health_age_ns: int,
         joint_buffer_capacity: int = 4096,
+        odometry_health_config: OdometryHealthConfig | None = None,
+        orientation_fusion_config: OrientationFusionConfig | None = None,
+        max_root_imu_gap_ns: int = 5_000_000,
     ):
         if not isinstance(source_epoch, int) or not 0 <= source_epoch <= (1 << 64) - 1:
             raise BridgeCoreError("source epoch must be an unsigned 64-bit integer")
@@ -315,6 +333,8 @@ class BridgeCore:
             raise BridgeCoreError(
                 "correction input-age threshold cannot exceed hold-age threshold"
             )
+        if max_root_imu_gap_ns < 0:
+            raise BridgeCoreError("root IMU gap threshold must be non-negative")
         if any(len(digest) != 32 for digest in allowed_calibration_digests):
             raise BridgeCoreError("allowlisted calibration digests must contain 32 bytes")
         self.calibration = calibration
@@ -331,9 +351,26 @@ class BridgeCore:
         self._health: EstimatorHealthSample | None = None
         self._sequence = 0
         self._physical_sensor_T_observed = np.eye(4)
+        self._odometry_health_gate = (
+            None
+            if odometry_health_config is None
+            else OdometryHealthGate(odometry_health_config)
+        )
+        self.last_odometry_health: OdometryHealthState | None = None
+        self.max_root_imu_gap_ns = max_root_imu_gap_ns
+        self._root_imu_buffer = RootImuBuffer(capacity=joint_buffer_capacity)
+        self._orientation_fusion = (
+            None
+            if orientation_fusion_config is None
+            else PelvisOrientationFusion(orientation_fusion_config)
+        )
+        self.last_orientation_fusion: OrientationFusionResult | None = None
 
     def append_joint(self, sample: TimedJointSample) -> None:
         self._joint_buffer.append(sample)
+
+    def append_root_imu(self, sample: TimedRootImuSample) -> None:
+        self._root_imu_buffer.append(sample)
 
     def update_correction(self, sample: CorrectionSample) -> None:
         if self._corrections:
@@ -357,8 +394,15 @@ class BridgeCore:
         self.source_epoch = source_epoch
         self._sequence = 0
         self._joint_buffer.clear()
+        self._root_imu_buffer.clear()
         self._corrections.clear()
         self._health = None
+        if self._odometry_health_gate is not None:
+            self._odometry_health_gate.reset()
+        self.last_odometry_health = None
+        if self._orientation_fusion is not None:
+            self._orientation_fusion.reset()
+        self.last_orientation_fusion = None
 
     def _correction_at(
         self,
@@ -420,6 +464,44 @@ class BridgeCore:
         pelvis_angular = _bridge_vector(
             pelvis.angular_velocity_world, "pelvis_angular_velocity_world"
         )
+        root_imu_sync_valid = False
+        root_orientation_fused = False
+        if self._orientation_fusion is not None:
+            try:
+                root_imu_match = self._root_imu_buffer.synchronize(
+                    normalized.estimate_time_ns,
+                    max_gap_ns=self.max_root_imu_gap_ns,
+                )
+            except RootImuSynchronizationError as error:
+                raise BridgeCoreError(
+                    f"root IMU synchronization failed: {error}"
+                ) from error
+            root_imu_sync_valid = (
+                root_imu_match.maximum_bracket_gap_ns <= self.max_root_imu_gap_ns
+            )
+            self.last_orientation_fusion = self._orientation_fusion.update(
+                source_time_ns=normalized.estimate_time_ns,
+                local_world_R_pelvis=world_T_pelvis[:3, :3],
+                root_imu=root_imu_match.sample,
+            )
+            if self.last_orientation_fusion.healthy:
+                world_T_pelvis[:3, :3] = (
+                    self.last_orientation_fusion.world_R_pelvis
+                )
+                pelvis_angular = self.last_orientation_fusion.angular_velocity_world
+                root_orientation_fused = True
+        pelvis_quaternion = _quaternion_wxyz(world_T_pelvis[:3, :3])
+        if self._odometry_health_gate is not None:
+            try:
+                self.last_odometry_health = self._odometry_health_gate.update(
+                    source_time_ns=normalized.estimate_time_ns,
+                    position_xyz_m=world_T_pelvis[:3, 3],
+                    quaternion_wxyz=pelvis_quaternion,
+                )
+            except ValueError as error:
+                raise BridgeCoreError(
+                    f"odometry plausibility check failed: {error}"
+                ) from error
         correction = self._correction_at(
             estimate_time_ns=normalized.estimate_time_ns,
             observation_receipt_time_ns=normalized.receipt_time_ns,
@@ -431,7 +513,20 @@ class BridgeCore:
             health_sample is not None
             and 0 <= publish_time_ns - health_sample.receipt_time_ns <= self.max_health_age_ns
         )
-        if normalized.estimator_healthy and health_fresh and health_sample.healthy:
+        plausibility_healthy = (
+            self.last_odometry_health is None
+            or self.last_odometry_health.healthy
+        )
+        if (
+            normalized.estimator_healthy
+            and health_fresh
+            and health_sample.healthy
+            and plausibility_healthy
+            and (
+                self._orientation_fusion is None
+                or root_orientation_fused
+            )
+        ):
             health_flags |= RootStateHealth.ESTIMATOR_HEALTHY
         health_flags |= RootStateHealth.FINITE_POSE
         if joint_match.maximum_bracket_gap_ns <= self.max_joint_gap_ns:
@@ -462,6 +557,10 @@ class BridgeCore:
         )
         if clock_valid:
             health_flags |= RootStateHealth.CLOCK_VALID
+        if root_imu_sync_valid:
+            health_flags |= RootStateHealth.ROOT_IMU_SYNC_VALID
+        if root_orientation_fused:
+            health_flags |= RootStateHealth.ROOT_ORIENTATION_FUSED
 
         self._sequence += 1
         correction_time_ns = 0 if correction is None else correction.evidence_time_ns
@@ -483,9 +582,7 @@ class BridgeCore:
                 position=tuple(
                     float(value) for value in world_T_pelvis[:3, 3]
                 ),
-                quaternion_wxyz=_quaternion_wxyz(
-                    world_T_pelvis[:3, :3]
-                ),
+                quaternion_wxyz=pelvis_quaternion,
                 linear_velocity=tuple(
                     float(value) for value in pelvis_linear
                 ),

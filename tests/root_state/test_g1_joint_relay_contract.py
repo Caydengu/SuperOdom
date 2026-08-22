@@ -16,6 +16,9 @@ def test_g1_relay_is_typed_read_only_and_stamps_before_networking() -> None:
     assert "time.time_ns()" in source
     assert "socket.SOCK_DGRAM" in source
     assert "serialize_joint_packet" in source
+    assert "serialize_root_imu_packet" in source
+    assert "imu.quaternion" in source
+    assert "imu.gyroscope" in source
     for forbidden in (
         "ChannelPublisher",
         "LowCmd_",

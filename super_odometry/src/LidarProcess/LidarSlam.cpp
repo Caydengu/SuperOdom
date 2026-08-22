@@ -2,6 +2,8 @@
 // LOCAL
 #include "super_odometry/LidarProcess/LidarSlam.h"
 
+#include <cmath>
+
 
 //TODO: add to header file
 double pose_parameters[7] = {0, 0, 0, 0, 0, 0, 1};
@@ -164,35 +166,47 @@ namespace super_odometry {
             // Transform and add new features to map
             transformAndAddToMap(EdgesPoints, WorldEdgesPoints, true);
             transformAndAddToMap(PlanarsPoints, WorldPlanarsPoints, false);
+            // Advance both members together only after acceptance.  Rejected
+            // scans must keep the pose and time of the last trusted update so
+            // the next velocity check uses one coherent interval.
+            last_T_w_lidar = T_w_lidar;
+            lasttimeLaserOdometry = timeLaserOdometry;
         }
-        
-        // Update timing
-        lasttimeLaserOdometry = timeLaserOdometry;
     }
 
     bool LidarSLAM::checkMotionThresholds(double timeLaserOdometry, super_odometry_msgs::msg::OptimizationStats &stats) {
-    
-        bool acceptResult = true;
         double delta_t = timeLaserOdometry - lasttimeLaserOdometry;
-        
-        // Check velocity threshold
-        if (stats.translation_from_last/delta_t > OptSet.velocity_failure_threshold) {
+
+        // A non-forward or non-finite source-time interval cannot support a
+        // velocity check.  Keep the last accepted pose and fail closed.
+        if (delta_t <= 0.0 || !std::isfinite(delta_t)) {
             T_w_lidar = last_T_w_lidar;
             startupCount = 5;
-            acceptResult = false;
-            RCLCPP_WARN(node_->get_logger(), "large motion detected, ignoring predictor for a while");
+            RCLCPP_WARN(node_->get_logger(),
+                        "invalid LiDAR source-time interval, rejecting optimized pose");
+            return false;
         }
-        
+
+        // Check velocity threshold
+        const double translation_speed = stats.translation_from_last / delta_t;
+        if (!std::isfinite(translation_speed)
+            || translation_speed > OptSet.velocity_failure_threshold) {
+            T_w_lidar = last_T_w_lidar;
+            startupCount = 5;
+            RCLCPP_WARN(node_->get_logger(), "large motion detected, ignoring predictor for a while");
+            return false;
+        }
+
         // Check small motion threshold
         if (stats.translation_from_last < 0.02 && stats.rotation_from_last < 0.005) {
-            acceptResult = false;
             T_w_lidar = last_T_w_lidar;
             RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
                                 "very small motion, not accumulating. %f", stats.translation_from_last);
+            return false;
         }
-    acceptResult = true;
-    return acceptResult;
-}
+
+        return true;
+    }
 
 
     void LidarSLAM::updateOptimizationStats(TicToc &t_opt, super_odometry_msgs::msg::OptimizationStats &stats){
@@ -206,7 +220,6 @@ namespace super_odometry {
 
         stats.translation_from_last = diff_from_last_T.pos.norm();
         stats.rotation_from_last = 2 * atan2(diff_from_last_T.rot.vec().norm(), diff_from_last_T.rot.w());
-        last_T_w_lidar=T_w_lidar;
     }
 
 

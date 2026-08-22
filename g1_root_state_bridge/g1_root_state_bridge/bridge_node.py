@@ -46,6 +46,8 @@ from g1_root_state_bridge.joint_transport import (
 )
 from g1_root_state_bridge.joint_contract import TimedJointSample
 from g1_root_state_bridge.kinematics import PelvisKinematics
+from g1_root_state_bridge.odometry_health import OdometryHealthConfig
+from g1_root_state_bridge.orientation_fusion import OrientationFusionConfig
 from g1_root_state_bridge.policy_state_protocol import (
     build_policy_state_v1,
     serialize_policy_state_v1,
@@ -53,6 +55,11 @@ from g1_root_state_bridge.policy_state_protocol import (
 from g1_root_state_bridge.protocol import (
     RootStatePacketV2,
     serialize_root_state_v2,
+)
+from g1_root_state_bridge.root_imu_transport import (
+    ROOT_IMU_PACKET_MAGIC,
+    RootImuPacketDecoder,
+    RootImuPacketError,
 )
 
 
@@ -142,10 +149,22 @@ class G1RootStateBridgeNode(Node):
         self.declare_parameter("calibration_digest_sha256", "")
         self.declare_parameter("max_joint_transport_age_ms", 10.0)
         self.declare_parameter("max_joint_sync_gap_ms", 10.0)
+        self.declare_parameter("max_root_imu_transport_age_ms", 10.0)
+        self.declare_parameter("max_root_imu_sync_gap_ms", 5.0)
         self.declare_parameter("max_correction_input_age_ms", 150.0)
         self.declare_parameter("max_correction_age_ms", 250.0)
         self.declare_parameter("max_health_age_ms", 20.0)
         self.declare_parameter("pending_state_timeout_ms", 10.0)
+        self.declare_parameter("enable_odometry_plausibility_gate", False)
+        self.declare_parameter("odometry_gate_window_ms", 200.0)
+        self.declare_parameter("odometry_gate_max_planar_speed_mps", 1.5)
+        self.declare_parameter("odometry_gate_max_yaw_rate_radps", 2.0)
+        self.declare_parameter("odometry_gate_recovery_ms", 1000.0)
+        self.declare_parameter("enable_root_imu_fusion", False)
+        self.declare_parameter("root_imu_yaw_anchor_tau_s", 0.75)
+        self.declare_parameter("root_imu_maximum_step_ms", 50.0)
+        self.declare_parameter("root_imu_max_yaw_innovation_deg", 45.0)
+        self.declare_parameter("root_imu_gyro_z_sign", 1.0)
         self.declare_parameter("replay_jsonl_path", "")
 
         self._calibration_contract: CalibrationContract = (
@@ -181,6 +200,11 @@ class G1RootStateBridgeNode(Node):
         self._joint_decoder = JointPacketDecoder(
             allowed_mapping_digests={canonical_joint_mapping_digest()},
             max_age_ms=float(self.get_parameter("max_joint_transport_age_ms").value),
+        )
+        self._root_imu_decoder = RootImuPacketDecoder(
+            max_age_ms=float(
+                self.get_parameter("max_root_imu_transport_age_ms").value
+            )
         )
 
         import zmq
@@ -326,6 +350,28 @@ class G1RootStateBridgeNode(Node):
         )
         source_epoch = self._process_epoch + reset_id
         try:
+            odometry_health_config = None
+            if bool(self.get_parameter("enable_odometry_plausibility_gate").value):
+                odometry_health_config = OdometryHealthConfig(
+                    window_ns=int(
+                        float(self.get_parameter("odometry_gate_window_ms").value)
+                        * 1_000_000
+                    ),
+                    max_planar_speed_mps=float(
+                        self.get_parameter(
+                            "odometry_gate_max_planar_speed_mps"
+                        ).value
+                    ),
+                    max_yaw_rate_radps=float(
+                        self.get_parameter(
+                            "odometry_gate_max_yaw_rate_radps"
+                        ).value
+                    ),
+                    recovery_hold_ns=int(
+                        float(self.get_parameter("odometry_gate_recovery_ms").value)
+                        * 1_000_000
+                    ),
+                )
             self._core = BridgeCore(
                 calibration=calibration,
                 kinematics=PelvisKinematics(),
@@ -347,6 +393,34 @@ class G1RootStateBridgeNode(Node):
                 ),
                 max_health_age_ns=int(
                     float(self.get_parameter("max_health_age_ms").value) * 1_000_000
+                ),
+                odometry_health_config=odometry_health_config,
+                orientation_fusion_config=(
+                    OrientationFusionConfig(
+                        yaw_anchor_time_constant_s=float(
+                            self.get_parameter("root_imu_yaw_anchor_tau_s").value
+                        ),
+                        maximum_step_s=float(
+                            self.get_parameter("root_imu_maximum_step_ms").value
+                        )
+                        / 1000.0,
+                        maximum_yaw_innovation_rad=np.radians(
+                            float(
+                                self.get_parameter(
+                                    "root_imu_max_yaw_innovation_deg"
+                                ).value
+                            )
+                        ),
+                        gyro_z_sign=float(
+                            self.get_parameter("root_imu_gyro_z_sign").value
+                        ),
+                    )
+                    if bool(self.get_parameter("enable_root_imu_fusion").value)
+                    else None
+                ),
+                max_root_imu_gap_ns=int(
+                    float(self.get_parameter("max_root_imu_sync_gap_ms").value)
+                    * 1_000_000
                 ),
             )
         except (BridgeCoreError, RuntimeError, ValueError) as error:
@@ -464,6 +538,26 @@ class G1RootStateBridgeNode(Node):
             except BlockingIOError:
                 break
             receipt_ns = time.time_ns()
+            if payload[:8] == ROOT_IMU_PACKET_MAGIC:
+                try:
+                    root_imu = self._root_imu_decoder.decode(
+                        payload, receipt_ns=receipt_ns
+                    )
+                except RootImuPacketError as error:
+                    self._status(
+                        "root_imu_rejected",
+                        reason=(
+                            self._root_imu_decoder.last_rejection_reason
+                            or str(error)
+                        ),
+                    )
+                    continue
+                if self._core is not None:
+                    try:
+                        self._core.append_root_imu(root_imu)
+                    except ValueError as error:
+                        self._status("root_imu_rejected", reason=str(error))
+                continue
             try:
                 sample = self._joint_decoder.decode(payload, receipt_ns=receipt_ns)
             except JointPacketError as error:
@@ -628,6 +722,23 @@ class G1RootStateBridgeNode(Node):
                 linear_velocity_world=packet.linear_velocity,
                 angular_velocity_world=packet.angular_velocity,
                 estimator_uncertainty_scores=self._last_stats_uncertainty,
+                odometry_plausibility=(
+                    None
+                    if self._core is None or self._core.last_odometry_health is None
+                    else {
+                        "healthy": self._core.last_odometry_health.healthy,
+                        "reason": self._core.last_odometry_health.reason,
+                        "window_duration_ns": (
+                            self._core.last_odometry_health.window_duration_ns
+                        ),
+                        "planar_speed_mps": (
+                            self._core.last_odometry_health.planar_speed_mps
+                        ),
+                        "yaw_rate_radps": (
+                            self._core.last_odometry_health.yaw_rate_radps
+                        ),
+                    }
+                ),
                 calibration_digest_sha256=packet.calibration_digest.hex(),
             )
 
