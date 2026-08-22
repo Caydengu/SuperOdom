@@ -3,10 +3,11 @@ from __future__ import annotations
 import math
 
 import numpy as np
-
+import pytest
 from g1_root_state_bridge.orientation_fusion import (
     OrientationFusionConfig,
     PelvisOrientationFusion,
+    gravity_aligned_heading,
 )
 from g1_root_state_bridge.root_imu_buffer import RootImuBuffer
 from g1_root_state_bridge.root_imu_contract import TimedRootImuSample
@@ -78,3 +79,13 @@ def test_fusion_fails_closed_on_large_yaw_innovation() -> None:
     assert not result.healthy
     assert result.reason == "yaw_innovation"
     assert np.allclose(result.world_R_pelvis, rot_z(1.0))
+
+
+def test_gravity_aligned_heading_preserves_lio_yaw_without_state() -> None:
+    half_roll = math.radians(12.0) / 2.0
+    result = gravity_aligned_heading(
+        heading_rotation=rot_z(math.radians(31.0)),
+        gravity_quaternion_wxyz=(math.cos(half_roll), math.sin(half_roll), 0.0, 0.0),
+    )
+    assert math.degrees(yaw(result)) == pytest.approx(31.0)
+    assert math.degrees(math.atan2(result[2, 1], result[2, 2])) == pytest.approx(12.0)

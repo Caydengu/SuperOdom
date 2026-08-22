@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -47,6 +47,35 @@ def _rotation_from_rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
     )
 
 
+def gravity_aligned_heading(
+    *,
+    heading_rotation: np.ndarray,
+    gravity_quaternion_wxyz: tuple[float, ...],
+) -> np.ndarray:
+    """Combine an LIO heading with root-IMU gravity without gyro integration.
+
+    This is the zero-latency alternative to :class:`PelvisOrientationFusion`:
+    roll and pitch come directly from the pelvis-mounted IMU while yaw remains
+    anchored to the current LiDAR-inertial estimate.  It is deliberately
+    stateless, so an incorrect gyro sign or yaw-rate bias cannot accumulate.
+    """
+
+    heading = np.asarray(heading_rotation, dtype=np.float64)
+    if heading.shape != (3, 3) or not np.all(np.isfinite(heading)):
+        raise ValueError("heading_rotation must be one finite rotation")
+    quaternion = np.asarray(gravity_quaternion_wxyz, dtype=np.float64)
+    if quaternion.shape != (4,) or not np.all(np.isfinite(quaternion)):
+        raise ValueError("gravity_quaternion_wxyz must contain four finite values")
+    norm = float(np.linalg.norm(quaternion))
+    if norm <= 0.0:
+        raise ValueError("gravity quaternion has zero norm")
+    roll, pitch, _ = _rpy_from_rotation(
+        _rotation_from_wxyz(tuple(float(value / norm) for value in quaternion))
+    )
+    _, _, yaw = _rpy_from_rotation(heading)
+    return _rotation_from_rpy(roll, pitch, yaw)
+
+
 @dataclass(frozen=True)
 class OrientationFusionConfig:
     yaw_anchor_time_constant_s: float = 0.75
@@ -84,8 +113,8 @@ class PelvisOrientationFusion:
     pelvis gyro between source-timestamped LIO observations.
     """
 
-    def __init__(self, config: OrientationFusionConfig = OrientationFusionConfig()):
-        self.config = config
+    def __init__(self, config: OrientationFusionConfig | None = None):
+        self.config = config if config is not None else OrientationFusionConfig()
         self.reset()
 
     def reset(self) -> None:
@@ -131,7 +160,8 @@ class PelvisOrientationFusion:
         if dt <= 0.0:
             return OrientationFusionResult(
                 world_R_pelvis=local_rotation.copy(),
-                angular_velocity_world=local_rotation @ np.asarray(root_imu.angular_velocity),
+                angular_velocity_world=local_rotation
+                @ np.asarray(root_imu.angular_velocity),
                 healthy=False,
                 reason="non_monotonic_source_time",
                 source_time_ns=source_time_ns,
@@ -141,7 +171,8 @@ class PelvisOrientationFusion:
             self._fused_yaw = local_yaw
             return OrientationFusionResult(
                 world_R_pelvis=local_rotation.copy(),
-                angular_velocity_world=local_rotation @ np.asarray(root_imu.angular_velocity),
+                angular_velocity_world=local_rotation
+                @ np.asarray(root_imu.angular_velocity),
                 healthy=False,
                 reason="source_gap",
                 source_time_ns=source_time_ns,
@@ -157,7 +188,8 @@ class PelvisOrientationFusion:
             self._fused_yaw = local_yaw
             return OrientationFusionResult(
                 world_R_pelvis=local_rotation.copy(),
-                angular_velocity_world=local_rotation @ np.asarray(root_imu.angular_velocity),
+                angular_velocity_world=local_rotation
+                @ np.asarray(root_imu.angular_velocity),
                 healthy=False,
                 reason="yaw_innovation",
                 source_time_ns=source_time_ns,
