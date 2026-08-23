@@ -182,21 +182,33 @@ def generate_treatments(
     source_records: list[dict[str, object]],
     lowstate: LowStateCapture,
     *,
+    source_time_domain: str = "robot",
     maximum_joint_age_ms: float = 10.0,
     minimum_joint_coverage: float = 0.99,
 ) -> Iterator[dict[str, object]]:
     source_times = np.asarray(
         [record["source_time_ns"] for record in source_records], dtype=np.int64
     )
-    admissible = (source_times >= lowstate.robot_stamp_ns[0]) & (
-        source_times <= lowstate.robot_stamp_ns[-1]
+    if source_time_domain == "robot":
+        lowstate_match_times = lowstate.robot_stamp_ns
+        source_event_times = np.rint(lowstate.clock.map_ns(source_times)).astype(np.int64)
+    elif source_time_domain == "oslo_event":
+        lowstate_match_times = lowstate.oslo_event_ns
+        source_event_times = source_times
+    else:
+        raise AmoTreatmentError(
+            "source_time_domain must be 'robot' or 'oslo_event'"
+        )
+    admissible = (source_times >= lowstate_match_times[0]) & (
+        source_times <= lowstate_match_times[-1]
     )
     source_records = [
         record for record, keep in zip(source_records, admissible) if keep
     ]
     source_times = source_times[admissible]
-    indices = _nearest_indices(lowstate.robot_stamp_ns, source_times)
-    ages_ns = np.abs(source_times - lowstate.robot_stamp_ns[indices])
+    source_event_times = source_event_times[admissible]
+    indices = _nearest_indices(lowstate_match_times, source_times)
+    ages_ns = np.abs(source_times - lowstate_match_times[indices])
     joint_admissible = ages_ns <= maximum_joint_age_ms * 1e6
     coverage = float(np.mean(joint_admissible)) if joint_admissible.size else 0.0
     if coverage < minimum_joint_coverage:
@@ -207,6 +219,7 @@ def generate_treatments(
         record for record, keep in zip(source_records, joint_admissible) if keep
     ]
     source_times = source_times[joint_admissible]
+    source_event_times = source_event_times[joint_admissible]
     indices = indices[joint_admissible]
     ages_ns = ages_ns[joint_admissible]
 
@@ -220,8 +233,8 @@ def generate_treatments(
             OrientationFusionConfig(gyro_z_sign=-1.0)
         ),
     }
-    for record, source_time_ns, low_index, lowstate_age_ns in zip(
-        source_records, source_times, indices, ages_ns
+    for record, source_time_ns, event_time_ns, low_index, lowstate_age_ns in zip(
+        source_records, source_times, source_event_times, indices, ages_ns
     ):
         source_time = int(source_time_ns)
         position = np.asarray(record["position_xyz_m"], dtype=np.float64)
@@ -247,9 +260,7 @@ def generate_treatments(
             joint_sample=joint,
             physical_sensor_T_observed=identity,
         )
-        event_realtime_ns = round(
-            float(lowstate.clock.map_ns(np.asarray([source_time]))[0])
-        )
+        event_realtime_ns = int(event_time_ns)
         common = {
             "schema": "g1_amo_localization_treatment_track_v1",
             "kind": "pose",

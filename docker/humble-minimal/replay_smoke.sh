@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-Usage: replay_smoke.sh --bag /data/BAG --output /output/NAME [--config PATH] [--rate FLOAT]
+Usage: replay_smoke.sh --bag /data/BAG --output /output/NAME [--config PATH] [--rate FLOAT] [--odom-topic TOPIC] [--allow-missing-pipeline-events]
 EOF
 }
 
@@ -11,6 +11,8 @@ bag=""
 output=""
 config=/opt/superodom_ws/install/share/super_odometry/config/livox_mid360_gantry.yaml
 rate=1.0
+odom_topic=/state_estimation
+require_pipeline_events=true
 
 while (( $# )); do
   case "$1" in
@@ -33,6 +35,15 @@ while (( $# )); do
       [[ $# -ge 2 ]] || { usage; exit 2; }
       rate=$2
       shift 2
+      ;;
+    --odom-topic)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      odom_topic=$2
+      shift 2
+      ;;
+    --allow-missing-pipeline-events)
+      require_pipeline_events=false
+      shift
       ;;
     *)
       echo "Unknown option: $1" >&2
@@ -164,7 +175,7 @@ for executable in feature_extraction_node laser_mapping_node imu_preintegration_
 done
 
 ros2 bag record --use-sim-time -o "$output" \
-  /state_estimation \
+  "$odom_topic" \
   /lidar_pipeline_events &
 record_pid=$!
 kill -0 "$record_pid" 2>/dev/null || { echo "Recorder exited before playback" >&2; exit 1; }
@@ -180,20 +191,31 @@ launch_pid=""
 
 bag_info="$(ros2 bag info "$output")"
 printf '%s\n' "$bag_info"
-message_count="$(sed -n '/Topic: \/state_estimation/ s/.*Count: \([0-9][0-9]*\).*/\1/p' <<<"$bag_info" | head -n 1)"
+message_count="$(
+  grep -F "Topic: $odom_topic " <<<"$bag_info" \
+    | sed -n 's/.*Count: \([0-9][0-9]*\).*/\1/p' \
+    | head -n 1
+)"
 [[ "$message_count" =~ ^[0-9]+$ ]] && (( message_count > 0 )) || {
-  echo "Replay produced no /state_estimation messages" >&2
+  echo "Replay produced no $odom_topic messages" >&2
   exit 1
 }
-echo "Validated /state_estimation messages: $message_count"
+if [[ "$odom_topic" == /state_estimation ]]; then
+  echo "Validated /state_estimation messages: $message_count"
+else
+  echo "Validated $odom_topic messages: $message_count"
+fi
 
 pipeline_event_count="$(
   sed -n \
     '/Topic: \/lidar_pipeline_events/ s/.*Count: \([0-9][0-9]*\).*/\1/p' \
     <<<"$bag_info" | head -n 1
 )"
-[[ "$pipeline_event_count" =~ ^[0-9]+$ ]] && (( pipeline_event_count > 0 )) || {
+if [[ "$pipeline_event_count" =~ ^[0-9]+$ ]] && (( pipeline_event_count > 0 )); then
+  echo "Validated /lidar_pipeline_events messages: $pipeline_event_count"
+elif [[ "$require_pipeline_events" == true ]]; then
   echo "Replay produced no /lidar_pipeline_events messages" >&2
   exit 1
-}
-echo "Validated /lidar_pipeline_events messages: $pipeline_event_count"
+else
+  echo "Allowed missing /lidar_pipeline_events for an uninstrumented estimator image"
+fi

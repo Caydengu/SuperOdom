@@ -16,6 +16,15 @@ def main() -> None:
     parser.add_argument("--odometry-track", type=Path, required=True)
     parser.add_argument("--lowstate", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--odometry-time-domain",
+        choices=("robot", "oslo_event"),
+        default="robot",
+        help=(
+            "Clock domain of odometry source_time_ns. Use oslo_event only "
+            "after a documented sensor-header-to-Oslo clock mapping."
+        ),
+    )
     args = parser.parse_args()
     if args.output.exists():
         raise FileExistsError(f"refusing to overwrite {args.output}")
@@ -34,13 +43,18 @@ def main() -> None:
                     "lowstate": str(args.lowstate),
                     "motive_online_input": False,
                     "physical_sensor_T_observed": "identity",
+                    "odometry_time_domain": args.odometry_time_domain,
                     "source_odometry_health": loaded.health,
                 },
                 sort_keys=True,
             )
             + "\n"
         )
-        for record in generate_treatments(source, lowstate):
+        for record in generate_treatments(
+            source,
+            lowstate,
+            source_time_domain=args.odometry_time_domain,
+        ):
             treatment = str(record["treatment"])
             counts[treatment] = counts.get(treatment, 0) + 1
             stream.write(

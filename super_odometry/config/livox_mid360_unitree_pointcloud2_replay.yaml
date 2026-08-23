@@ -1,0 +1,54 @@
+/**:
+  ros__parameters:
+    # Offline form of Gio's G1 PointCloud2 profile. The replay preprocessor
+    # rewrites the native float32 per-point time from ns to seconds in place,
+    # so the cloud remains on its recorded topic rather than passing through
+    # the live _sec relay.
+    imu_topic: "/utlidar/imu_livox_mid360"
+    laser_topic: "/utlidar/cloud_livox_mid360"
+    # Deliberately disable odometry feedback, matching Gio's live Track A
+    # profile. This keeps the raw LiDAR-inertial baseline independent of its
+    # own /state_estimation publisher.
+    odom_topic: "/state_estimation2"
+    sensor: "velodyne"
+    use_imu_roll_pitch: false
+
+    world_frame: "map"
+    world_frame_rot: "map_rot"
+    sensor_frame: "sensor"
+    sensor_frame_rot: "sensor_rot"
+
+    imu_acc_x_limit: 0.5
+    imu_acc_y_limit: 0.2
+    imu_acc_z_limit: 0.4
+
+    feature_extraction_node:
+        scan_line: 4
+        min_range: 1.5
+        filter_point_size: 1
+        mapping_skip_frame: 1
+        provide_point_time: 1
+
+    laser_mapping_node:
+        mapping_line_resolution: 0.2
+        mapping_plane_resolution: 0.4
+        max_iterations: 4
+        max_surface_features: 2000
+
+        localization_mode: false
+        read_pose_file: false
+        init_x: 0.0
+        init_y: 0.0
+        init_z: 0.0
+        init_roll: 0.0
+        init_pitch: 0.0
+        init_yaw: 0.0
+
+    imu_preintegration_node:
+        lidar_correction_noise: 0.01
+        predict_future_secs: 0.0
+        acc_n: 3.9939570888238808e-03
+        gyr_n: 1.5636343949698187e-03
+        acc_w: 6.4356659353532566e-05
+        gyr_w: 3.5640318696367613e-05
+        g_norm: 9.80511
