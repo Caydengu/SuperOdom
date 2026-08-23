@@ -26,8 +26,9 @@ to G1-2296 walks as if only the localization algorithm changed.
 
 G1-4123 must have its own Motive rigid body and rigid-body-to-pelvis calibration.
 Do not reuse G1-2296's `G1-PELVIS-2296` body or Streaming ID `39`. Record the
-verified G1-4123 rigid-body name and Streaming ID below as
-`<G1_4123_RB_NAME>` and `<G1_4123_RB_ID>` before running any capture command.
+operator-confirmed G1-4123 rigid body as `G1_PELVIS_F_4123`, Streaming ID `42`.
+Confirm visually in Motive that it is tracking the intended robot before every
+capture.
 
 ## Questions to send Gio before lab
 
@@ -117,8 +118,8 @@ scripts/snapshot_g1_localization_stack.sh \
 
 In Motive, before modifying anything:
 
-1. Select or create `<G1_4123_RB_NAME>` and verify
-   `<G1_4123_RB_ID>`. Confirm visually that it tracks G1-4123, not another G1.
+1. Select `G1_PELVIS_F_4123` and verify Streaming ID `42`. Confirm visually
+   that it tracks G1-4123, not another G1.
 2. Enable Bones/Bone Orientation and Marker Constraints.
 3. Screenshot the Properties, Info, and 3D views with the G1 facing a known
    room direction. Record which local axis points robot-forward, left, and up.
@@ -150,8 +151,8 @@ Keep the G1 upright and still for the entire 30 seconds:
 
 ```bash
 cd /move/u/caydengu/cayden/.worktrees/superodom-g1-motive-amo-localization-eval
-G1_4123_RB_ID=REPLACE_WITH_MOTIVE_STREAMING_ID
-G1_4123_RB_NAME=REPLACE_WITH_MOTIVE_RIGID_BODY_NAME
+G1_4123_RB_ID=42
+G1_4123_RB_NAME=G1_PELVIS_F_4123
 scripts/run_g1_motive_dataset.sh \
   --run-dir /move/u/caydengu/cayden/research/perceptive-humanoid-diffusion/runs/2026-08-22_g1-4123-motive-stationary-01 \
   --duration-sec 30 \
