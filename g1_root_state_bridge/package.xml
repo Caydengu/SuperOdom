@@ -3,7 +3,7 @@
 <package format="3">
   <name>g1_root_state_bridge</name>
   <version>0.1.0</version>
-  <description>Typed SuperOdometry-to-Unitree-G1 pelvis state bridge.</description>
+  <description>Typed G1 LiDAR-inertial local-odometry and pelvis-state bridge.</description>
   <maintainer email="caydengu@stanford.edu">Cayden Gu</maintainer>
   <license>BSD-3-Clause</license>
 
@@ -15,6 +15,7 @@
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-zmq</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>super_odometry_msgs</exec_depend>
 

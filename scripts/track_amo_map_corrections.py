@@ -88,6 +88,7 @@ def main() -> None:
         accepted = (
             float(candidate["inlier_fraction"]) >= 0.50
             and float(candidate["p95_m"]) <= 0.15
+            and bool(candidate["observability"]["observable"])
             and jump_m <= 0.25
             and yaw_jump_deg <= 3.0
         )
@@ -106,6 +107,7 @@ def main() -> None:
                 "yaw_jump_deg": yaw_jump_deg,
                 "query_point_count": int(query_xy.shape[0]),
                 "pose_match_age_ms_p95": audit["pose_match_age_ms_p95"],
+                "observability": candidate["observability"],
             },
         }
         corrections.append(correction)
@@ -121,6 +123,8 @@ def main() -> None:
         "gates": {
             "minimum_inlier_fraction": 0.50,
             "maximum_p95_m": 0.15,
+            "minimum_observability_eigenvalue": 0.02,
+            "maximum_observability_condition_number": 1e6,
             "maximum_pose_jump_m": 0.25,
             "maximum_yaw_jump_deg": 3.0,
         },

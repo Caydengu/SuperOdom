@@ -152,6 +152,7 @@ def score_frozen_windows(
     run_name: str,
     front_plane_to_pelvis_x_m: float,
     reference_label: str,
+    alignment_treatment: str | None = None,
 ) -> dict[str, object]:
     metadata = load_treatment_metadata(treatment_path)
     tracks = load_treatment_tracks(treatment_path)
@@ -174,9 +175,13 @@ def score_frozen_windows(
     run = matches[0]
     run_origin_ns = int(lowstate.oslo_event_ns[0])
     scoring_start_ns = run_origin_ns + round(float(run["boundary_s"]) * 1e9)
-    sensor = tracks.get("superodom_sensor")
+    alignment_name = (
+        alignment_treatment
+        or str(metadata.get("alignment_reference_treatment", "superodom_sensor"))
+    )
+    sensor = tracks.get(alignment_name)
     if sensor is None:
-        raise ValueError("one shared alignment requires superodom_sensor")
+        raise ValueError(f"one shared alignment requires {alignment_name}")
     rotation, alignment = calibrate_score_window_rotation(
         sensor,
         motive,
@@ -243,6 +248,7 @@ def score_frozen_windows(
         "front_plane_to_pelvis_x_m": front_plane_to_pelvis_x_m,
         "absolute_pelvis_front_plane_claims_admitted": False,
         "alignment": alignment,
+        "alignment_reference_treatment": alignment_name,
         "alignment_contract": "one full-active-run yaw rotation shared by every treatment; segment origin reset only",
         "window_contract": windows_document["contract"],
         "treatment_metadata": metadata,
@@ -261,6 +267,7 @@ def main() -> int:
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--front-plane-to-pelvis-x-m", type=float, default=0.0)
     parser.add_argument("--reference-label", required=True)
+    parser.add_argument("--alignment-treatment")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists():
@@ -273,6 +280,7 @@ def main() -> int:
         run_name=args.run_name,
         front_plane_to_pelvis_x_m=args.front_plane_to_pelvis_x_m,
         reference_label=args.reference_label,
+        alignment_treatment=args.alignment_treatment,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")

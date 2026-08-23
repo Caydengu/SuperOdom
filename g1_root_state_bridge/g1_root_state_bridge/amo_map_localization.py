@@ -12,6 +12,7 @@ from scipy.signal import fftconvolve
 from scipy.spatial import cKDTree
 
 from g1_root_state_bridge.amo_treatments import load_odometry_track, rotation_from_xyzw
+from g1_root_state_bridge.waist_kinematics import pelvis_T_mid360
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,43 @@ def voxelize_xy(points: np.ndarray, resolution_m: float) -> np.ndarray:
     cells = np.rint(points / resolution_m).astype(np.int64)
     _, indices = np.unique(cells, axis=0, return_index=True)
     return points[np.sort(indices)]
+
+
+def vertical_persistence_xy(
+    points_xyz: np.ndarray,
+    *,
+    xy_resolution_m: float = 0.10,
+    height_resolution_m: float = 0.10,
+    minimum_vertical_span_m: float = 0.40,
+    minimum_height_bins: int = 4,
+) -> np.ndarray:
+    """Keep XY columns supported over height, rejecting floors/tabletops."""
+    points = np.asarray(points_xyz, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3 or not points.size:
+        raise ValueError("vertical persistence requires a nonempty Nx3 cloud")
+    finite = np.all(np.isfinite(points), axis=1)
+    points = points[finite]
+    xy_cell = np.rint(points[:, :2] / xy_resolution_m).astype(np.int64)
+    z_cell = np.rint(points[:, 2] / height_resolution_m).astype(np.int64)
+    unique_xy, inverse = np.unique(xy_cell, axis=0, return_inverse=True)
+    z_min = np.full(unique_xy.shape[0], np.inf)
+    z_max = np.full(unique_xy.shape[0], -np.inf)
+    np.minimum.at(z_min, inverse, points[:, 2])
+    np.maximum.at(z_max, inverse, points[:, 2])
+    unique_xy_z = np.unique(np.column_stack((inverse, z_cell)), axis=0)
+    height_bin_count = np.bincount(
+        unique_xy_z[:, 0], minlength=unique_xy.shape[0]
+    )
+    admitted = ((z_max - z_min) >= minimum_vertical_span_m) & (
+        height_bin_count >= minimum_height_bins
+    )
+    if not np.any(admitted):
+        raise ValueError("no XY columns pass the vertical-persistence gate")
+    xy_sum = np.zeros((unique_xy.shape[0], 2), dtype=np.float64)
+    xy_count = np.bincount(inverse, minlength=unique_xy.shape[0])
+    np.add.at(xy_sum, inverse, points[:, :2])
+    xy_mean = xy_sum / xy_count[:, None]
+    return xy_mean[admitted]
 
 
 def structural_cloud(
@@ -106,6 +144,89 @@ def structural_cloud(
     }
 
 
+def pelvis_structural_cloud(
+    archive: ScanArchive,
+    pelvis_records: list[dict[str, object]],
+    lowstate: object,
+    *,
+    start_source_time_ns: int,
+    end_source_time_ns: int,
+    scan_stride: int = 2,
+    pelvis_height_min_m: float = -1.1,
+    pelvis_height_max_m: float = 1.3,
+    voxel_resolution_m: float = 0.10,
+    maximum_pose_age_ms: float = 15.0,
+    maximum_lowstate_age_ms: float = 10.0,
+    minimum_vertical_span_m: float = 0.40,
+    minimum_height_bins: int = 4,
+) -> tuple[np.ndarray, dict[str, object]]:
+    """Build a z-up local structural cloud from pelvis odometry and sensor scans."""
+    pose_time = np.asarray(
+        [row["source_time_ns"] for row in pelvis_records], dtype=np.int64
+    )
+    scan_indices = np.flatnonzero(
+        (archive.source_time_ns >= start_source_time_ns)
+        & (archive.source_time_ns <= end_source_time_ns)
+    )[::scan_stride]
+    if not scan_indices.size:
+        raise ValueError("no scans overlap the pelvis structural-cloud window")
+
+    def nearest(reference: np.ndarray, query: np.ndarray) -> np.ndarray:
+        right = np.clip(np.searchsorted(reference, query, side="left"), 0, reference.size - 1)
+        left = np.clip(right - 1, 0, reference.size - 1)
+        return np.where(np.abs(query - reference[left]) <= np.abs(reference[right] - query), left, right)
+
+    scan_time = archive.source_time_ns[scan_indices]
+    pose_index = nearest(pose_time, scan_time)
+    lowstate_time = np.asarray(lowstate.oslo_event_ns, dtype=np.int64)
+    lowstate_index = nearest(lowstate_time, scan_time)
+    pose_age_ns = np.abs(scan_time - pose_time[pose_index])
+    lowstate_age_ns = np.abs(scan_time - lowstate_time[lowstate_index])
+    admitted = (pose_age_ns <= maximum_pose_age_ms * 1e6) & (
+        lowstate_age_ns <= maximum_lowstate_age_ms * 1e6
+    )
+    transformed: list[np.ndarray] = []
+    for scan_index, pose_match, low_match in zip(
+        scan_indices[admitted], pose_index[admitted], lowstate_index[admitted]
+    ):
+        row = pelvis_records[int(pose_match)]
+        world_R_pelvis = rotation_from_xyzw(np.asarray(row["quaternion_xyzw"]))
+        world_t_pelvis = np.asarray(row["position_xyz_m"], dtype=np.float64)
+        q = np.asarray(lowstate.joint_position[int(low_match)], dtype=np.float64)
+        pelvis_T_sensor = pelvis_T_mid360(*q[12:15])
+        points = archive.scan(int(scan_index)).astype(np.float64)
+        points_pelvis = points @ pelvis_T_sensor[:3, :3].T + pelvis_T_sensor[:3, 3]
+        height_gate = (points_pelvis[:, 2] >= pelvis_height_min_m) & (
+            points_pelvis[:, 2] <= pelvis_height_max_m
+        )
+        points_pelvis = points_pelvis[height_gate]
+        world = points_pelvis @ world_R_pelvis.T + world_t_pelvis
+        transformed.append(world)
+    if not transformed:
+        raise ValueError("no scans passed pelvis pose, LowState, and height gates")
+    cloud = vertical_persistence_xy(
+        np.concatenate(transformed, axis=0),
+        xy_resolution_m=voxel_resolution_m,
+        minimum_vertical_span_m=minimum_vertical_span_m,
+        minimum_height_bins=minimum_height_bins,
+    )
+    return cloud, {
+        "requested_scan_count": int(scan_indices.size),
+        "admitted_scan_count": int(np.sum(admitted)),
+        "pose_match_age_ms_p95": float(np.quantile(pose_age_ns[admitted], 0.95) * 1e-6),
+        "lowstate_match_age_ms_p95": float(np.quantile(lowstate_age_ns[admitted], 0.95) * 1e-6),
+        "point_count": int(cloud.shape[0]),
+        "scan_stride": scan_stride,
+        "voxel_resolution_m": voxel_resolution_m,
+        "pelvis_height_range_m": [pelvis_height_min_m, pelvis_height_max_m],
+        "minimum_vertical_span_m": minimum_vertical_span_m,
+        "minimum_height_bins": minimum_height_bins,
+        "start_source_time_ns": start_source_time_ns,
+        "end_source_time_ns": end_source_time_ns,
+        "frame_contract": "physical_mid360_points -> dynamic pelvis FK -> initial pelvis local",
+    }
+
+
 def _rotation_row(angle_rad: float) -> np.ndarray:
     cosine, sine = math.cos(angle_rad), math.sin(angle_rad)
     return np.asarray(((cosine, sine), (-sine, cosine)), dtype=np.float64)
@@ -166,6 +287,55 @@ def _fit_rigid_row(
     return rotation, translation
 
 
+def directional_observability(
+    map_xy: np.ndarray,
+    transformed_query_xy: np.ndarray,
+    target_indices: np.ndarray,
+    admitted: np.ndarray,
+    *,
+    neighbors: int = 8,
+) -> dict[str, object]:
+    """Measure planar point-to-plane information in x, y, and yaw.
+
+    Scalar nearest-neighbor residuals can look excellent along a single wall
+    while translation tangent to that wall is unobservable.  This normalized
+    Gauss-Newton information matrix exposes that directional failure.
+    """
+    selected = np.flatnonzero(admitted)
+    if selected.size < max(100, neighbors):
+        return {
+            "eigenvalues": [0.0, 0.0, 0.0],
+            "minimum_eigenvalue": 0.0,
+            "condition_number": math.inf,
+            "sample_count": int(selected.size),
+            "observable": False,
+        }
+    tree = cKDTree(map_xy)
+    _, neighbor_index = tree.query(
+        map_xy[target_indices[selected]], k=min(neighbors, map_xy.shape[0]), workers=-1
+    )
+    neighborhood = map_xy[np.asarray(neighbor_index)]
+    centered = neighborhood - np.mean(neighborhood, axis=1, keepdims=True)
+    covariance = np.einsum("nki,nkj->nij", centered, centered)
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    del eigenvalues
+    normal = eigenvectors[:, :, 0]
+    point = transformed_query_xy[selected]
+    yaw_column = normal[:, 0] * (-point[:, 1]) + normal[:, 1] * point[:, 0]
+    jacobian = np.column_stack((normal[:, 0], normal[:, 1], yaw_column))
+    information = jacobian.T @ jacobian / selected.size
+    spectrum = np.linalg.eigvalsh(information)
+    minimum = float(spectrum[0])
+    condition = float(spectrum[-1] / minimum) if minimum > 1e-12 else math.inf
+    return {
+        "eigenvalues": [float(value) for value in spectrum],
+        "minimum_eigenvalue": minimum,
+        "condition_number": condition,
+        "sample_count": int(selected.size),
+        "observable": bool(minimum >= 0.02 and condition <= 1e6),
+    }
+
+
 def refine_icp(
     map_xy: np.ndarray,
     query_xy: np.ndarray,
@@ -195,9 +365,12 @@ def refine_icp(
             break
         previous_rmse = rmse
     transformed = query_xy @ total_rotation + total_translation
-    distance, _ = tree.query(transformed, workers=-1)
+    distance, index = tree.query(transformed, workers=-1)
     admitted = distance <= maximum_correspondence_m
     residual = distance[admitted]
+    observability = directional_observability(
+        map_xy, transformed, index, admitted
+    )
     return {
         "rotation": total_rotation,
         "translation_m": total_translation,
@@ -207,6 +380,7 @@ def refine_icp(
         "rmse_m": float(np.sqrt(np.mean(residual**2))) if residual.size else math.inf,
         "p95_m": float(np.quantile(residual, 0.95)) if residual.size else math.inf,
         "maximum_correspondence_m": maximum_correspondence_m,
+        "observability": observability,
     }
 
 
@@ -217,6 +391,7 @@ def global_localize(
     coarse_yaw_step_deg: float = 5.0,
     fine_yaw_step_deg: float = 0.5,
     correlation_resolution_m: float = 0.15,
+    maximum_correspondence_m: float = 0.35,
 ) -> dict[str, object]:
     coarse = [
         correlate_at_yaw(
@@ -250,6 +425,7 @@ def global_localize(
         query_xy,
         np.asarray(best["rotation"]),
         np.asarray(best["translation_m"]),
+        maximum_correspondence_m=maximum_correspondence_m,
     )
     second_nonlocal = next(
         (
@@ -274,6 +450,7 @@ def global_localize(
         and peak_ratio >= 1.03
         and float(icp["inlier_fraction"]) >= 0.45
         and float(icp["p95_m"]) <= 0.25
+        and bool(icp["observability"]["observable"])
     )
     return {
         "schema": "g1_cross_run_map_localization_v1",
@@ -309,6 +486,9 @@ def global_localize(
             "minimum_peak_ratio": 1.03,
             "minimum_icp_inlier_fraction": 0.45,
             "maximum_icp_p95_m": 0.25,
+            "icp_maximum_correspondence_m": maximum_correspondence_m,
+            "minimum_observability_eigenvalue": 0.02,
+            "maximum_observability_condition_number": 1e6,
         },
         "healthy": healthy,
     }

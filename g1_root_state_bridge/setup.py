@@ -21,7 +21,7 @@ setup(
     zip_safe=False,
     maintainer="Cayden Gu",
     maintainer_email="caydengu@stanford.edu",
-    description="Typed SuperOdometry-to-Unitree-G1 pelvis state bridge.",
+    description="Typed G1 LiDAR-inertial local-odometry and pelvis-state bridge.",
     license="BSD-3-Clause",
     entry_points={
         "console_scripts": [

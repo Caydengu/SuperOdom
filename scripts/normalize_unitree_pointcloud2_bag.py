@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Normalize Unitree MID-360 PointCloud2 per-point time from ns to seconds.
+"""Normalize Unitree MID-360 replay timing and optional IMU acceleration units.
 
 The G1 native projection stores ``time`` as float32 nanoseconds within each
 scan. SuperOdometry's PointCloud2 ingestion path expects float32 seconds. This
-tool rewrites only that field and preserves topic names, message headers, bag
-receipt timestamps, IMU bytes, and every other point field.
+tool rewrites only that field by default.  ``--imu-accel-scale`` additionally
+supports a controlled replay treatment for G1 captures whose Livox IMU reports
+acceleration in g even though ``sensor_msgs/Imu`` requires m/s^2.
 """
 
 from __future__ import annotations
@@ -19,6 +20,15 @@ import numpy as np
 
 
 POINT_FIELD_FLOAT32 = 7
+
+
+def scale_imu_acceleration(message: Any, scale: float) -> None:
+    """Scale only the linear-acceleration vector of an Imu-like message."""
+    if not np.isfinite(scale) or scale <= 0.0:
+        raise ValueError(f"IMU acceleration scale must be positive and finite: {scale}")
+    message.linear_acceleration.x *= float(scale)
+    message.linear_acceleration.y *= float(scale)
+    message.linear_acceleration.z *= float(scale)
 
 
 def fit_header_clock(
@@ -130,6 +140,7 @@ def normalize_bag(
     scale: float,
     align_header_to_bag_clock: bool,
     imu_topic: str,
+    imu_accel_scale: float = 1.0,
 ) -> dict[str, object]:
     import rosbag2_py
     from rclpy.serialization import deserialize_message, serialize_message
@@ -227,6 +238,8 @@ def normalize_bag(
             raw_min = min(raw_min, float(stats["raw_time_min"]))
             raw_max = max(raw_max, float(stats["raw_time_max"]))
             scaled_max = max(scaled_max, float(stats["scaled_time_max_s"]))
+        if topic == imu_topic and imu_accel_scale != 1.0:
+            scale_imu_acceleration(message, imu_accel_scale)
         if topic in (lidar_topic, imu_topic):
             serialized = serialize_message(message)
         writer.write(topic, serialized, int(receipt_time_ns))
@@ -239,11 +252,15 @@ def normalize_bag(
             f"scaled per-point time maximum {scaled_max} s is outside [0, 1]; wrong scale?"
         )
     return {
-        "schema": "unitree_pointcloud2_time_normalization_v1",
+        "schema": "unitree_pointcloud2_replay_normalization_v2",
         "input_bag": str(input_bag),
         "output_bag": str(output_bag),
         "lidar_topic": lidar_topic,
         "time_scale": scale,
+        "imu_accel_scale": imu_accel_scale,
+        "imu_accel_output_units": (
+            "m/s^2" if np.isclose(imu_accel_scale, 9.80665) else "source units scaled"
+        ),
         "header_aligned_to_bag_clock": align_header_to_bag_clock,
         "header_clock_mappings": header_mappings,
         "applied_header_clock_mapping_topic": (
@@ -257,7 +274,11 @@ def normalize_bag(
         "preserved": [
             "topic names and types",
             "bag receipt timestamps",
-            "IMU payload fields except header stamp",
+            (
+                "IMU payload fields except header stamp"
+                if imu_accel_scale == 1.0
+                else "IMU payload fields except header stamp and linear acceleration"
+            ),
             "all PointCloud2 fields except time",
         ]
         + (
@@ -278,6 +299,12 @@ def main() -> int:
     parser.add_argument("--time-scale", type=float, default=1e-9)
     parser.add_argument("--imu-topic", default="/utlidar/imu_livox_mid360")
     parser.add_argument(
+        "--imu-accel-scale",
+        type=float,
+        default=1.0,
+        help="Multiply Livox linear acceleration by this factor (9.80665 converts g to m/s^2).",
+    )
+    parser.add_argument(
         "--align-header-to-bag-clock",
         action="store_true",
         help="Map LiDAR and IMU header clocks to the rosbag /clock epoch.",
@@ -291,6 +318,7 @@ def main() -> int:
         scale=args.time_scale,
         align_header_to_bag_clock=args.align_header_to_bag_clock,
         imu_topic=args.imu_topic,
+        imu_accel_scale=args.imu_accel_scale,
     )
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.report:

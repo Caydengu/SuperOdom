@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-Usage: replay_smoke.sh --bag /data/BAG --output /output/NAME [--config PATH] [--rate FLOAT] [--odom-topic TOPIC] [--allow-missing-pipeline-events]
+Usage: replay_smoke.sh --bag /data/BAG --output /output/NAME [--config PATH] [--rate FLOAT] [--odom-topic TOPIC] [--extra-topic TOPIC] [--allow-missing-pipeline-events]
 EOF
 }
 
@@ -12,6 +12,7 @@ output=""
 config=/opt/superodom_ws/install/share/super_odometry/config/livox_mid360_gantry.yaml
 rate=1.0
 odom_topic=/state_estimation
+extra_topics=()
 require_pipeline_events=true
 
 while (( $# )); do
@@ -39,6 +40,11 @@ while (( $# )); do
     --odom-topic)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       odom_topic=$2
+      shift 2
+      ;;
+    --extra-topic)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      extra_topics+=("$2")
       shift 2
       ;;
     --allow-missing-pipeline-events)
@@ -91,7 +97,7 @@ find_process() {
     [[ -r "$cmdline" ]] || continue
     process_args=()
     mapfile -d '' -t process_args < "$cmdline" || true
-    if [[ "${process_args[0]:-}" == "/opt/superodom_ws/install/lib/super_odometry/$executable" ]]; then
+    if [[ "${process_args[0]:-}" == */lib/super_odometry/"$executable" ]]; then
       pid=${cmdline#/proc/}
       printf '%s\n' "${pid%/cmdline}"
       return 0
@@ -176,6 +182,7 @@ done
 
 ros2 bag record --use-sim-time -o "$output" \
   "$odom_topic" \
+  "${extra_topics[@]}" \
   /lidar_pipeline_events &
 record_pid=$!
 kill -0 "$record_pid" 2>/dev/null || { echo "Recorder exited before playback" >&2; exit 1; }
@@ -205,6 +212,19 @@ if [[ "$odom_topic" == /state_estimation ]]; then
 else
   echo "Validated $odom_topic messages: $message_count"
 fi
+
+for extra_topic in "${extra_topics[@]}"; do
+  extra_count="$(
+    grep -F "Topic: $extra_topic " <<<"$bag_info" \
+      | sed -n 's/.*Count: \([0-9][0-9]*\).*/\1/p' \
+      | head -n 1
+  )"
+  [[ "$extra_count" =~ ^[0-9]+$ ]] && (( extra_count > 0 )) || {
+    echo "Replay produced no $extra_topic messages" >&2
+    exit 1
+  }
+  echo "Validated $extra_topic messages: $extra_count"
+done
 
 pipeline_event_count="$(
   sed -n \

@@ -1,0 +1,51 @@
+/**:
+  ros__parameters:
+    # Frozen from G1-4123:
+    # /home/unitree/geo-179/G1_localization/ws_slam/src/FAST_LIO_ROS2/config/utlidar.yaml
+    # Only timestamp_unit differs: the matched replay bag has already converted
+    # Unitree's float32 per-point nanoseconds into seconds.
+    feature_extract_enable: false
+    point_filter_num: 3
+    max_iteration: 3
+    filter_size_surf: 0.5
+    filter_size_map: 0.5
+    cube_side_length: 1000.0
+    runtime_pos_log_enable: false
+    map_file_path: "./test.pcd"
+
+    common:
+      lid_topic: "/utlidar/cloud_livox_mid360"
+      imu_topic: "/utlidar/imu_livox_mid360"
+      time_sync_en: false
+      time_offset_lidar_to_imu: 0.0
+
+    preprocess:
+      lidar_type: 2
+      scan_line: 32
+      scan_rate: 10
+      timestamp_unit: 0  # SEC after matched PointCloud2 normalization
+      blind: 0.5
+
+    mapping:
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      fov_degree: 360.0
+      det_range: 100.0
+      extrinsic_est_en: false
+      extrinsic_T: [-0.011, -0.02329, 0.04412]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, -1.0, 0.0,
+                    0.0, 0.0, -1.0]
+
+    publish:
+      path_en: false
+      scan_publish_en: false
+      dense_publish_en: false
+      scan_bodyframe_pub_en: false
+      map_en: false
+
+    pcd_save:
+      pcd_save_en: false
+      interval: -1

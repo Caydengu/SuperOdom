@@ -346,6 +346,16 @@ namespace super_odometry {
         }
 
         prevPose_ = lidarPose.compose(T_l_i);
+        // Preserve the stationary gyro bias admitted by initializeImu().  The
+        // integrators were constructed with this value, so resetting the graph
+        // prior and integrators to zero here creates an immediate contradiction
+        // and recurrent large-bias resets.
+        prevBias_ = gtsam::imuBias::ConstantBias(
+                gtsam::Vector3(0.0, 0.0, 0.0),
+                gtsam::Vector3(
+                    imu_Init->gyr_bias.x(),
+                    imu_Init->gyr_bias.y(),
+                    imu_Init->gyr_bias.z()));
 
         // Debug: Print initial state
         RCLCPP_INFO(this->get_logger(),
@@ -357,7 +367,12 @@ namespace super_odometry {
             "  Initial velocity: [%.3f, %.3f, %.3f]", 0.0, 0.0, 0.0);
         RCLCPP_INFO(this->get_logger(),
             "  Initial bias: acc=[%.3f, %.3f, %.3f], gyr=[%.3f, %.3f, %.3f]",
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            prevBias_.accelerometer().x(),
+            prevBias_.accelerometer().y(),
+            prevBias_.accelerometer().z(),
+            prevBias_.gyroscope().x(),
+            prevBias_.gyroscope().y(),
+            prevBias_.gyroscope().z());
 
         gtsam::PriorFactor<gtsam::Pose3> priorPose(X(0), prevPose_,
                                                    priorPoseNoise);
@@ -368,7 +383,6 @@ namespace super_odometry {
                                                     priorVelNoise);
         graphFactors.add(priorVel);
 
-        prevBias_ = gtsam::imuBias::ConstantBias();
         gtsam::PriorFactor<gtsam::imuBias::ConstantBias> priorBias(
                 B(0), prevBias_, priorBiasNoise);
         graphFactors.add(priorBias);

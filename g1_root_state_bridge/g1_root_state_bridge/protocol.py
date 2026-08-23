@@ -36,8 +36,11 @@ class RootStateHealth(IntFlag):
     CORRECTION_FRESH = 1 << 3
     CALIBRATION_VALID = 1 << 4
     CLOCK_VALID = 1 << 5
-    ROOT_IMU_SYNC_VALID = 1 << 6
-    ROOT_ORIENTATION_FUSED = 1 << 7
+    INERTIAL_DESKEW_VALID = 1 << 6
+    HEADING_VALID = 1 << 7
+    # Backward-compatible aliases for the first HSROOT02 producer.
+    ROOT_IMU_SYNC_VALID = INERTIAL_DESKEW_VALID
+    ROOT_ORIENTATION_FUSED = HEADING_VALID
 
 
 REQUIRED_HEALTH_FLAGS = (
@@ -51,8 +54,8 @@ REQUIRED_HEALTH_FLAGS = (
 
 REQUIRED_ROOT_FUSION_FLAGS = (
     REQUIRED_HEALTH_FLAGS
-    | RootStateHealth.ROOT_IMU_SYNC_VALID
-    | RootStateHealth.ROOT_ORIENTATION_FUSED
+    | RootStateHealth.INERTIAL_DESKEW_VALID
+    | RootStateHealth.HEADING_VALID
 )
 
 
