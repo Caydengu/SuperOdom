@@ -214,7 +214,12 @@ def _iter_json_lines(path: Path) -> Iterable[dict[str, object]]:
             yield payload
 
 
-def load_motive(path: str | Path) -> MotiveCapture:
+def load_motive(
+    path: str | Path,
+    *,
+    expected_rigid_body_id: int = PELVIS_RIGID_BODY_ID,
+    expected_rigid_body_name: str = PELVIS_RIGID_BODY_NAME,
+) -> MotiveCapture:
     source = Path(path)
     frames: list[dict[str, object]] = []
     rejected_tracking = 0
@@ -223,16 +228,16 @@ def load_motive(path: str | Path) -> MotiveCapture:
         if payload.get("record_type") == "metadata":
             if payload.get("schema") != MOTIVE_RAW_SCHEMA:
                 raise AmoDatasetError(f"{source}: unsupported Motive metadata schema")
-            if int(payload.get("requested_rigid_body_id", -1)) != PELVIS_RIGID_BODY_ID:
+            if int(payload.get("requested_rigid_body_id", -1)) != expected_rigid_body_id:
                 raise AmoDatasetError(f"{source}: wrong requested rigid-body ID")
-            if payload.get("rigid_body_name") != PELVIS_RIGID_BODY_NAME:
+            if payload.get("rigid_body_name") != expected_rigid_body_name:
                 raise AmoDatasetError(f"{source}: wrong requested rigid-body name")
             continue
         if payload.get("record_type") != "frame":
             raise AmoDatasetError(f"{source}: unsupported Motive record type")
-        if int(payload.get("rigid_body_id", -1)) != PELVIS_RIGID_BODY_ID:
+        if int(payload.get("rigid_body_id", -1)) != expected_rigid_body_id:
             raise AmoDatasetError(f"{source}: frame contains wrong rigid-body ID")
-        if payload.get("rigid_body_name") != PELVIS_RIGID_BODY_NAME:
+        if payload.get("rigid_body_name") != expected_rigid_body_name:
             raise AmoDatasetError(f"{source}: frame contains wrong rigid-body name")
         if not bool(payload.get("tracking_valid")):
             rejected_tracking += 1
@@ -344,7 +349,11 @@ def audit_run(run_dir: str | Path) -> tuple[dict[str, object], WalkingBoundary]:
     if manifest.get("schema") != DATASET_MANIFEST_SCHEMA:
         raise AmoDatasetError(f"{run}: unsupported dataset manifest")
     lowstate = load_lowstate(run / "lowstate" / "packets.bin")
-    motive = load_motive(run / "motive" / "frames.jsonl")
+    motive = load_motive(
+        run / "motive" / "frames.jsonl",
+        expected_rigid_body_id=int(manifest["rigid_body_id"]),
+        expected_rigid_body_name=str(manifest["rigid_body_name"]),
+    )
     boundary = detect_walking_boundary(lowstate)
     sequence_gaps = int(
         np.sum(np.maximum(np.diff(lowstate.sequence.astype(np.int64)) - 1, 0))

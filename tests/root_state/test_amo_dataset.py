@@ -7,6 +7,7 @@ from g1_root_state_bridge.amo_dataset import (
     LowStateCapture,
     detect_walking_boundary,
     fit_affine_lower_envelope_clock,
+    load_motive,
 )
 
 
@@ -60,3 +61,40 @@ def test_walking_boundary_returns_start_of_first_sustained_window() -> None:
     boundary = detect_walking_boundary(_capture_with_leg_activity(7.3))
     assert boundary.seconds_from_lowstate_start == pytest.approx(7.3)
     assert boundary.event_realtime_ns == 17_300_000_000
+
+
+def test_motive_identity_can_be_bound_from_a_run_manifest(tmp_path) -> None:
+    source = tmp_path / "frames.jsonl"
+    rows = [
+        {
+            "record_type": "metadata",
+            "schema": "g1_optitrack_raw_v1",
+            "requested_rigid_body_id": 42,
+            "rigid_body_name": "G1_PELVIS_F_4123",
+        }
+    ]
+    for index in range(3):
+        rows.append(
+            {
+                "record_type": "frame",
+                "rigid_body_id": 42,
+                "rigid_body_name": "G1_PELVIS_F_4123",
+                "tracking_valid": True,
+                "mean_marker_error_m": 0.001,
+                "motive_software_time_s": 10.0 + 0.01 * index,
+                "receipt_realtime_ns": 20_000_000_000 + 10_000_000 * index,
+                "frame_number": index,
+                "position_xyz_m_motive_native": [0.0, 0.0, 0.0],
+                "quaternion_xyzw_motive_native": [0.0, 0.0, 0.0, 1.0],
+            }
+        )
+    source.write_text(
+        "".join(__import__("json").dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    capture = load_motive(
+        source,
+        expected_rigid_body_id=42,
+        expected_rigid_body_name="G1_PELVIS_F_4123",
+    )
+    assert capture.total_frames == 3
