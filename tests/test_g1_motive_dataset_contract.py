@@ -17,6 +17,7 @@ def test_launcher_is_capture_only_and_refuses_bad_route() -> None:
     assert "/home/unitree/miniforge3/envs/egonav-deploy/bin/python" in source
     assert "/utlidar/cloud_livox_mid360" in source
     assert "/utlidar/imu_livox_mid360" in source
+    assert "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" in source
     assert "--vision-mode" in source
     assert 'source.replace(b"\\xef\\xbb\\xbf", b"")' in source
     assert "g1_lidar_capture" not in source

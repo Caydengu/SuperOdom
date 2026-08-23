@@ -268,6 +268,7 @@ ssh -o BatchMode=yes "$robot_user@$robot_host" "bash -lc '
   \"$robot_python\" -c \"import unitree_sdk2py\"
   source \"$robot_localization_root/ws_slam/install/setup.bash\"
   export ROS_DOMAIN_ID=$ros_domain_id
+  export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
   test \"\$(timeout 5s ros2 topic type \"$lidar_topic\")\" = \"$lidar_type\"
   test \"\$(timeout 5s ros2 topic type \"$imu_topic\")\" = \"$imu_type\"
 '"
