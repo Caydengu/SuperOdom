@@ -1,0 +1,181 @@
+import numpy as np
+import pytest
+
+from g1_root_state_bridge.joint_contract import CANONICAL_G1_JOINT_NAMES, TimedJointSample
+from g1_root_state_bridge.kiss_registration import RegistrationResult
+from g1_root_state_bridge.live_pipeline import (
+    LiveLocalizationConfig,
+    LiveLocalizationError,
+    SelectedLocalizationPipeline,
+)
+from g1_root_state_bridge.protocol import (
+    REQUIRED_ROOT_FUSION_FLAGS,
+    ROOT_STATE_V2_NUM_BYTES,
+    RootStateHealth,
+)
+
+
+class FakeRegistration:
+    def __init__(self) -> None:
+        self.index = 0
+
+    def register(self, _points: np.ndarray) -> RegistrationResult:
+        pose = np.eye(4)
+        pose[0, 3] = 0.1 * self.index
+        self.index += 1
+        return RegistrationResult(pose, 1.0, 0.2)
+
+    def reset(self) -> None:
+        self.index = 0
+
+
+def _joint(time_ns: int, sequence: int, *, waist_yaw: float = 0.0) -> TimedJointSample:
+    position = [0.0] * 29
+    position[12] = waist_yaw
+    return TimedJointSample(
+        stamp_ns=time_ns,
+        receipt_ns=time_ns,
+        names=CANONICAL_G1_JOINT_NAMES,
+        position=tuple(position),
+        velocity=(0.0,) * 29,
+        sequence=sequence,
+    )
+
+
+def test_pipeline_builds_strict_packet_from_bracketed_sources() -> None:
+    pipeline = SelectedLocalizationPipeline(
+        FakeRegistration(), LiveLocalizationConfig(gyro_bias_radps=(0.0, 0.0, 0.0))
+    )
+    start = 1_000_000_000
+    for index in range(31):
+        stamp = start - 10_000_000 + index * 5_000_000
+        pipeline.append_imu(stamp, np.zeros(3))
+        pipeline.append_joint(_joint(stamp, index))
+    output = pipeline.process_scan(
+        np.tile(np.asarray(((1.0, 0.0, 0.0),)), (20, 1)),
+        np.linspace(0.0, 0.1, 20),
+        scan_start_time_ns=start,
+        publish_time_ns=start + 120_000_000,
+    )
+    assert len(output.payload) == ROOT_STATE_V2_NUM_BYTES
+    assert output.packet.health_flags & REQUIRED_ROOT_FUSION_FLAGS == REQUIRED_ROOT_FUSION_FLAGS
+    assert output.source_joint_sequence == 22
+    assert output.source_joint_time_ns == start + 100_000_000
+    np.testing.assert_allclose(output.local_T_pelvis, np.eye(4), atol=1e-12)
+
+
+def test_replay_publish_offset_includes_measured_processing_time() -> None:
+    pipeline = SelectedLocalizationPipeline(
+        FakeRegistration(), LiveLocalizationConfig(gyro_bias_radps=(0.0, 0.0, 0.0))
+    )
+    start = 1_500_000_000
+    for index in range(31):
+        stamp = start - 10_000_000 + index * 5_000_000
+        pipeline.append_imu(stamp, np.zeros(3))
+        pipeline.append_joint(_joint(stamp, index))
+    output = pipeline.process_scan(
+        np.tile(np.asarray(((1.0, 0.0, 0.0),)), (20, 1)),
+        np.linspace(0.0, 0.1, 20),
+        scan_start_time_ns=start,
+        publish_time_offset_ns=5_000_000,
+    )
+    age_ns = output.packet.publish_time_ns - output.packet.estimate_time_ns
+    assert age_ns >= 5_000_000
+    assert age_ns < 50_000_000
+
+
+def test_pipeline_keeps_native_translation_and_uses_livox_yaw() -> None:
+    pipeline = SelectedLocalizationPipeline(
+        FakeRegistration(), LiveLocalizationConfig(gyro_bias_radps=(0.0, 0.0, 0.0))
+    )
+    start = 2_000_000_000
+    for index in range(61):
+        stamp = start - 10_000_000 + index * 5_000_000
+        gyro = np.asarray((0.0, 0.0, -1.0))
+        pipeline.append_imu(stamp, gyro)
+        pipeline.append_joint(_joint(stamp, index))
+    first = pipeline.process_scan(
+        np.tile(np.asarray(((1.0, 0.0, 0.0),)), (20, 1)),
+        np.linspace(0.0, 0.1, 20),
+        scan_start_time_ns=start,
+        publish_time_ns=start + 120_000_000,
+    )
+    second = pipeline.process_scan(
+        np.tile(np.asarray(((1.0, 0.0, 0.0),)), (20, 1)),
+        np.linspace(0.0, 0.1, 20),
+        scan_start_time_ns=start + 100_000_000,
+        publish_time_ns=start + 220_000_000,
+    )
+    assert first.packet.position[0] == pytest.approx(0.0, abs=1e-12)
+    assert second.packet.position[0] > 0.09
+    assert second.packet.quaternion_wxyz[3] > 0.0
+
+
+def test_navigation_heading_does_not_subtract_waist_yaw() -> None:
+    pipeline = SelectedLocalizationPipeline(
+        FakeRegistration(), LiveLocalizationConfig(gyro_bias_radps=(0.0, 0.0, 0.0))
+    )
+    start = 2_500_000_000
+    for index in range(61):
+        stamp = start - 10_000_000 + index * 5_000_000
+        pipeline.append_imu(stamp, np.zeros(3))
+        pipeline.append_joint(_joint(stamp, index, waist_yaw=0.01 * index))
+    first = pipeline.process_scan(
+        np.tile(np.asarray(((1.0, 0.0, 0.0),)), (20, 1)),
+        np.linspace(0.0, 0.1, 20),
+        scan_start_time_ns=start,
+        publish_time_ns=start + 120_000_000,
+    )
+    second = pipeline.process_scan(
+        np.tile(np.asarray(((1.0, 0.0, 0.0),)), (20, 1)),
+        np.linspace(0.0, 0.1, 20),
+        scan_start_time_ns=start + 100_000_000,
+        publish_time_ns=start + 220_000_000,
+    )
+    assert first.packet.quaternion_wxyz == pytest.approx((1.0, 0.0, 0.0, 0.0))
+    assert second.packet.quaternion_wxyz == pytest.approx((1.0, 0.0, 0.0, 0.0))
+
+
+def test_unpublished_bootstrap_advances_registration_without_packet() -> None:
+    registration = FakeRegistration()
+    pipeline = SelectedLocalizationPipeline(
+        registration, LiveLocalizationConfig(gyro_bias_radps=(0.0, 0.0, 0.0))
+    )
+    result = pipeline.bootstrap_unpublished_scan(np.ones((20, 3)))
+    assert result.sensor0_T_sensor[0, 3] == 0.0
+    assert registration.index == 1
+
+
+def test_reset_discards_registration_and_allows_one_new_bootstrap() -> None:
+    registration = FakeRegistration()
+    pipeline = SelectedLocalizationPipeline(
+        registration, LiveLocalizationConfig(gyro_bias_radps=(0.0, 0.0, 0.0))
+    )
+    pipeline.bootstrap_unpublished_scan(np.ones((20, 3)))
+    with pytest.raises(LiveLocalizationError, match="raw bootstrap"):
+        pipeline.bootstrap_unpublished_scan(np.ones((20, 3)))
+    pipeline.reset(1)
+    result = pipeline.bootstrap_unpublished_scan(np.ones((20, 3)))
+    assert result.sensor0_T_sensor[0, 3] == 0.0
+
+
+def test_untrusted_clock_or_calibration_stays_explicit_in_packet_health() -> None:
+    pipeline = SelectedLocalizationPipeline(
+        FakeRegistration(), LiveLocalizationConfig(gyro_bias_radps=(0.0, 0.0, 0.0))
+    )
+    start = 3_000_000_000
+    for index in range(31):
+        stamp = start - 10_000_000 + index * 5_000_000
+        pipeline.append_imu(stamp, np.zeros(3))
+        pipeline.append_joint(_joint(stamp, index))
+    output = pipeline.process_scan(
+        np.tile(np.asarray(((1.0, 0.0, 0.0),)), (20, 1)),
+        np.linspace(0.0, 0.1, 20),
+        scan_start_time_ns=start,
+        publish_time_ns=start + 120_000_000,
+        clock_valid=False,
+        calibration_valid=False,
+    )
+    assert not output.packet.health_flags & RootStateHealth.CLOCK_VALID
+    assert not output.packet.health_flags & RootStateHealth.CALIBRATION_VALID
+    assert not output.packet.strictly_valid
