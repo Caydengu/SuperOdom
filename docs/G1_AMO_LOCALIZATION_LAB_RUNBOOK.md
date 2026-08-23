@@ -19,42 +19,38 @@ The minimum successful session returns with:
 
 ## Robot selection
 
-Use the sensor-equipped `G-2296` only if its right ankle has been repaired or a
-current robot owner confirms it is safe for AMO walking. This preserves the
-same MID-360, camera, extrinsics, onboard workspace, and Motive body 39
-(`G1-PELVIS-2296`) used by walks 01 and 02.
+Use `G1-4123`. It is the robot with the required DEX3 hands and the connected
+Orin contains Gio's current localization, navigation, grasp, and deployment
+code. Treat this as a new robot-specific evaluation campaign; do not compare it
+to G1-2296 walks as if only the localization algorithm changed.
 
-The last retained diagnostic for G-2296 found severe right-ankle pitch/roll
-under-response, so an unrepaired G-2296 is not admitted for walking. If that
-condition is unresolved, do not substitute G-1323 silently. Either collect
-stationary/supported calibration and map evidence only, or start a separately
-named G-1323 campaign after verifying its sensor mount and defining a distinct
-Motive rigid body and calibration.
+G1-4123 must have its own Motive rigid body and rigid-body-to-pelvis calibration.
+Do not reuse G1-2296's `G1-PELVIS-2296` body or Streaming ID `39`. Record the
+verified G1-4123 rigid-body name and Streaming ID below as
+`<G1_4123_RB_NAME>` and `<G1_4123_RB_ID>` before running any capture command.
 
 ## Questions to send Gio before lab
 
-Ask Gio for the current provenance rather than assuming a particular external
-mapping product. The two answers most likely to change today's plan are which
-physical G1 is current and whether G-2296's right ankle is cleared for AMO.
+Ask Gio for the remaining map and software provenance rather than assuming a
+particular external mapping product. G1-4123 is now the selected robot because
+it has the required DEX3 hands and Gio's onboard code.
 
 Send this compact checklist:
 
-1. Which physical G1 should I use for the next localization walk, and has
-   G-2296's right ankle issue been repaired and cleared?
-2. What exact workflow/tool produced the current Field Bay and SRC kitchen
+1. What exact workflow/tool produced the current Field Bay and SRC kitchen
    maps: onboard MID-360 with FAST-LIO/SuperOdometry, Polycam, another scanner,
    or a combination?
-3. Where are the original map inputs and projects, not only the derived
+2. Where are the original map inputs and projects, not only the derived
    GLB/PCD? Please include the source recording or bag, generation command,
    config, branch/commit, date, units, coordinate origin/axes, voxel size, and
    any LiDAR-to-robot extrinsics.
-4. Which robot-side localization workspace and configuration are current? Is
+3. Which robot-side localization workspace and configuration are current? Is
    `/home/unitree/geo-179/G1_localization/ws_slam` still authoritative, and
    which `utlidar.yaml`, FAST-LIO/SuperOdometry revision, time-unit setting,
    and launch command were used?
-5. Is there newer or unpushed localization/map code or a newer room scan that
+4. Is there newer or unpushed localization/map code or a newer room scan that
    we should preserve before collecting data?
-6. Does he have a preferred room-rescan procedure, and can it export the raw
+5. Does he have a preferred room-rescan procedure, and can it export the raw
    point cloud/project in metric units in addition to any textured mesh?
 
 Do not wait on these answers to preserve raw onboard MID-360, Livox IMU,
@@ -72,7 +68,7 @@ Gio's preferred map-generation pipeline changes.
 - Record two independent metric scale checks, such as wall-to-wall distance and
   door width.
 - Photograph the robot serial label, MID-360 mount, pelvis marker cluster, and
-  cable routing. Record any repair or mount change since walks 01/02.
+  cable routing. Record DEX3 hardware identity and any robot or sensor repair.
 
 ## 0:00-0:15 — physical and non-actuating preflight
 
@@ -103,8 +99,8 @@ python3 -m holosoma_inference.g1_health_check \
   --out-dir data/g1_health
 ```
 
-Do not walk if the robot owner cannot confirm G-2296's ankle repair, the robot
-is not physically supported/clear, the direct network route is absent, or the
+Do not walk if G1-4123 is not physically supported/clear, the robot owner has
+not cleared the hardware for AMO, the direct network route is absent, or the
 non-actuating health check fails.
 
 ## 0:15-0:30 — preserve the exact robot stack and Motive asset
@@ -114,19 +110,22 @@ Snapshot all candidate robot-side locations without writing to the G1:
 ```bash
 cd /move/u/caydengu/cayden/.worktrees/superodom-g1-motive-amo-localization-eval
 scripts/snapshot_g1_localization_stack.sh \
-  --output-dir /move/u/caydengu/cayden/research/perceptive-humanoid-diffusion/runs/2026-08-22_g2296-localization-stack-snapshot
+  --output-dir /move/u/caydengu/cayden/research/perceptive-humanoid-diffusion/runs/2026-08-22_g1-4123-gio-stack-snapshot-04 \
+  --robot-id G1-4123 \
+  --include-docker-image superodom:humble-arm64
 ```
 
 In Motive, before modifying anything:
 
-1. Select `G1-PELVIS-2296`; verify Streaming ID `39`.
+1. Select or create `<G1_4123_RB_NAME>` and verify
+   `<G1_4123_RB_ID>`. Confirm visually that it tracks G1-4123, not another G1.
 2. Enable Bones/Bone Orientation and Marker Constraints.
 3. Screenshot the Properties, Info, and 3D views with the G1 facing a known
    room direction. Record which local axis points robot-forward, left, and up.
 4. Use **File -> Export Assets** and also **Export Profile As**, including
    Assets. Copy the `.motive` file and the relevant Take/session to the run
    folder after capture.
-5. Do not reset or rotate the ID-39 pivot before the frozen walk. If a cleaner
+5. Do not reset or rotate the chosen pivot before the frozen walk. If a cleaner
    pelvis-aligned asset is desired, make a versioned duplicate with a new
    Streaming ID after the frozen walk.
 
@@ -140,15 +139,24 @@ verbal estimate.
 
 ## 0:30-0:40 — stationary canary
 
+G1-4123 compatibility gate: the current capture launcher still assumes the
+G1-2296 path `/home/unitree/G1_localization` and offboard `/livox/*` topics.
+G1-4123 exposes Gio's checkout at `/home/unitree/geo-179/G1_localization` and
+native `/utlidar/cloud_livox_mid360` plus `/utlidar/imu_livox_mid360`. Do not
+run the command below until the passive capture adapter is updated and its dry
+run names those G1-4123 paths/topics.
+
 Keep the G1 upright and still for the entire 30 seconds:
 
 ```bash
 cd /move/u/caydengu/cayden/.worktrees/superodom-g1-motive-amo-localization-eval
+G1_4123_RB_ID=REPLACE_WITH_MOTIVE_STREAMING_ID
+G1_4123_RB_NAME=REPLACE_WITH_MOTIVE_RIGID_BODY_NAME
 scripts/run_g1_motive_dataset.sh \
-  --run-dir /move/u/caydengu/cayden/research/perceptive-humanoid-diffusion/runs/2026-08-22_g1-motive-stationary-03 \
+  --run-dir /move/u/caydengu/cayden/research/perceptive-humanoid-diffusion/runs/2026-08-22_g1-4123-motive-stationary-01 \
   --duration-sec 30 \
-  --rigid-body-id 39 \
-  --rigid-body-name G1-PELVIS-2296 \
+  --rigid-body-id "$G1_4123_RB_ID" \
+  --rigid-body-name "$G1_4123_RB_NAME" \
   --motive-server 172.24.68.77 \
   --motive-connection multicast
 ```
@@ -166,11 +174,11 @@ at least three distinct headings, and pauses. Do not tune the estimator against
 this run; it is for clock, axis, IMU-sign, and hand-eye calibration.
 
 Use the same capture command with run name
-`2026-08-22_g1-motive-pelvis-calibration-01` and `--duration-sec 120`. Mark
+`2026-08-22_g1-4123-motive-pelvis-calibration-01` and `--duration-sec 120`. Mark
 events from another terminal:
 
 ```bash
-RUN=/move/u/caydengu/cayden/research/perceptive-humanoid-diffusion/runs/2026-08-22_g1-motive-pelvis-calibration-01
+RUN=/move/u/caydengu/cayden/research/perceptive-humanoid-diffusion/runs/2026-08-22_g1-4123-motive-pelvis-calibration-01
 python3 scripts/mark_g1_motive_event.py --run-dir "$RUN" --label policy_enable
 python3 scripts/mark_g1_motive_event.py --run-dir "$RUN" --label motion_begin
 python3 scripts/mark_g1_motive_event.py --run-dir "$RUN" --label motion_end
@@ -208,13 +216,14 @@ chosen map origin. Never preserve only a decimated GLB.
 
 ## 1:20-1:40 — frozen confirmation walk
 
-Use exactly the same AMO policy, checkpoint, control rate, and launch command as
-walks 01/02. Do not change localization parameters or use Motive online.
+Freeze one G1-4123 AMO policy, checkpoint, control rate, and launch command for
+this campaign. Do not change localization parameters or use Motive online.
 Before launch, save the exact command, policy checkpoint path and SHA256, source
 branch/commit/status, controller/interface name, and operator command sequence
-to `lab_metadata/policy_provenance.txt`.
+to `lab_metadata/policy_provenance.txt`. Do not assume a G1-2296 checkpoint or
+calibration is valid for G1-4123.
 
-Capture `2026-08-22_g1-motive-amo-walk-03` for 180 seconds. Suggested trajectory:
+Capture `2026-08-22_g1-4123-motive-amo-walk-01` for 180 seconds. Suggested trajectory:
 
 1. 15 seconds stationary on the gantry before enabling the policy;
 2. straight segment, stop, and restart;
@@ -229,8 +238,9 @@ below 95%, lowstate has a material gap, or LiDAR/IMU is missing, preserve the
 failed run and use the remaining time for one fresh non-overwriting retry.
 
 If time and robot safety allow, collect a second independently named
-`walk-04-stress` emphasizing repeated turns and the feature-poor wall. Keep it
-sealed until walk-03 scoring and interpretation are complete.
+`g1-4123-motive-amo-walk-02-stress` emphasizing repeated turns and the
+feature-poor wall. Keep it sealed until walk-01 scoring and interpretation are
+complete.
 
 ## 1:40-2:00 — validation and departure gate
 
