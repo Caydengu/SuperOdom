@@ -3,17 +3,30 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-Usage: live_input_probe.sh --output-dir PATH --network-interface IFACE [--ros-domain-id 0..232] [--duration-sec N] [--dry-run]
+Usage: live_input_probe.sh --output-dir PATH --network-interface IFACE [options]
 
-Record only the live /livox/lidar and /livox/imu boundary from the stationary
-G1. This probe does not launch SuperOdometry or any robot-control process.
+Record only the configured live LiDAR and IMU boundary from the stationary G1.
+This probe does not launch SuperOdometry or any robot-control process.
+
+Options:
+  --ros-domain-id ID       default: 0
+  --duration-sec N         default: 30
+  --lidar-topic TOPIC      default: /utlidar/cloud_livox_mid360
+  --lidar-type TYPE        default: sensor_msgs/msg/PointCloud2
+  --imu-topic TOPIC        default: /utlidar/imu_livox_mid360
+  --imu-type TYPE          default: sensor_msgs/msg/Imu
+  --dry-run
 EOF
 }
 
 output_dir=""
-ros_domain_id=42
+ros_domain_id=0
 duration_sec=30
 network_interface=""
+lidar_topic=/utlidar/cloud_livox_mid360
+lidar_type=sensor_msgs/msg/PointCloud2
+imu_topic=/utlidar/imu_livox_mid360
+imu_type=sensor_msgs/msg/Imu
 dry_run=false
 
 while (( $# )); do
@@ -38,6 +51,26 @@ while (( $# )); do
       network_interface=$2
       shift 2
       ;;
+    --lidar-topic)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      lidar_topic=$2
+      shift 2
+      ;;
+    --lidar-type)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      lidar_type=$2
+      shift 2
+      ;;
+    --imu-topic)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      imu_topic=$2
+      shift 2
+      ;;
+    --imu-type)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      imu_type=$2
+      shift 2
+      ;;
     --dry-run)
       dry_run=true
       shift
@@ -60,6 +93,18 @@ done
   echo "Duration must be an integer from 5 through 600 seconds" >&2
   exit 2
 }
+for topic in "$lidar_topic" "$imu_topic"; do
+  [[ "$topic" =~ ^/[A-Za-z0-9_/]+$ ]] || {
+    echo "Topics must be absolute ROS names containing letters, digits, underscores, and slashes" >&2
+    exit 2
+  }
+done
+for message_type in "$lidar_type" "$imu_type"; do
+  [[ "$message_type" =~ ^[A-Za-z0-9_]+/msg/[A-Za-z0-9_]+$ ]] || {
+    echo "Message types must use package/msg/Type syntax" >&2
+    exit 2
+  }
+done
 
 output_dir="$(mkdir -p "$output_dir" && cd "$output_dir" && pwd -P)"
 mkdir -p "$output_dir/logs" "$output_dir/data" "$output_dir/runtime-input"
@@ -84,6 +129,10 @@ fi
 
 container_script='set -euo pipefail
 duration_sec=$1
+lidar_topic=$2
+lidar_type=$3
+imu_topic=$4
+imu_type=$5
 
 wait_for_type() {
   local topic=$1
@@ -105,18 +154,18 @@ wait_for_type() {
   return 22
 }
 
-wait_for_type /livox/lidar livox_ros_driver2/msg/CustomMsg
-wait_for_type /livox/imu sensor_msgs/msg/Imu
+wait_for_type "$lidar_topic" "$lidar_type"
+wait_for_type "$imu_topic" "$imu_type"
 
 ros2 topic list -t > /output/logs/live_input_topic_list.txt
 ros2 node list > /output/logs/live_input_node_list.txt
-ros2 topic info /livox/lidar --verbose > /output/logs/live_input_lidar_info.txt
-ros2 topic info /livox/imu --verbose > /output/logs/live_input_imu_info.txt
+ros2 topic info "$lidar_topic" --verbose > /output/logs/live_input_lidar_info.txt
+ros2 topic info "$imu_topic" --verbose > /output/logs/live_input_imu_info.txt
 
 set +e
 timeout --signal=INT --kill-after=15s "${duration_sec}s" \
   ros2 bag record -o /output/data/live_input_probe \
-  /livox/lidar /livox/imu \
+  "$lidar_topic" "$imu_topic" \
   > /output/logs/live_input_record.log 2>&1
 record_status=$?
 set -e
@@ -133,4 +182,5 @@ ros2 bag info /output/data/live_input_probe > /output/logs/live_input_bag_info.t
 '
 
 exec "$run_wrapper" "${wrapper_args[@]}" -- \
-  bash -c "$container_script" live-input-probe "$duration_sec"
+  bash -c "$container_script" live-input-probe \
+    "$duration_sec" "$lidar_topic" "$lidar_type" "$imu_topic" "$imu_type"

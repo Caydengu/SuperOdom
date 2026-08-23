@@ -172,7 +172,10 @@ def test_runtime_wrapper_rejects_invalid_ros_domain_id(tmp_path: Path) -> None:
 
 def test_live_probe_and_shadow_are_bounded_and_non_actuating(tmp_path: Path) -> None:
     expected = {
-        "live_input_probe.sh": ("/livox/lidar", "/livox/imu"),
+        "live_input_probe.sh": (
+            "/utlidar/cloud_livox_mid360",
+            "/utlidar/imu_livox_mid360",
+        ),
         "live_shadow.sh": ("/livox/lidar", "/livox/imu", "/state_estimation"),
     }
     forbidden = (

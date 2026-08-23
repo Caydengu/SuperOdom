@@ -20,6 +20,11 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def check_dataset(run_dir: Path) -> dict[str, Any]:
     checks: dict[str, dict[str, Any]] = {}
+    manifest_path = run_dir / "manifest.json"
+    manifest = load_json(manifest_path) if manifest_path.is_file() else {}
+    lidar_topic = str(manifest.get("lidar_topic", "/livox/lidar"))
+    imu_topic = str(manifest.get("imu_topic", "/livox/imu"))
+    vision_required = bool(manifest.get("vision_enabled", True))
 
     motive_path = run_dir / "motive" / "summary.json"
     if motive_path.is_file():
@@ -45,11 +50,11 @@ def check_dataset(run_dir: Path) -> dict[str, Any]:
     if lidar_metadata.is_file():
         text = lidar_metadata.read_text(encoding="utf-8")
         lidar_counts: dict[str, int] = {}
-        for topic in ("/livox/lidar", "/livox/imu"):
+        for topic in (lidar_topic, imu_topic):
             pattern = rf"name:\s*{re.escape(topic)}\b[\s\S]*?message_count:\s*(\d+)"
             match = re.search(pattern, text)
             lidar_counts[topic] = int(match.group(1)) if match else 0
-        lidar_ok = lidar_counts["/livox/lidar"] > 0 and lidar_counts["/livox/imu"] > 0
+        lidar_ok = lidar_counts[lidar_topic] > 0 and lidar_counts[imu_topic] > 0
         checks["lidar_and_livox_imu"] = {"ok": lidar_ok, "message_counts": lidar_counts}
     else:
         checks["lidar_and_livox_imu"] = {"ok": False, "reason": "missing metadata.yaml"}
@@ -60,7 +65,11 @@ def check_dataset(run_dir: Path) -> dict[str, Any]:
         name: (vision_dir / name).stat().st_size if (vision_dir / name).is_file() else 0
         for name in required_vision
     }
-    checks["rgbd"] = {"ok": all(size > 0 for size in vision_sizes.values()), "sizes_bytes": vision_sizes}
+    checks["rgbd"] = {
+        "ok": not vision_required or all(size > 0 for size in vision_sizes.values()),
+        "required": vision_required,
+        "sizes_bytes": vision_sizes,
+    }
 
     process_status_path = run_dir / "process_status.json"
     if process_status_path.is_file():

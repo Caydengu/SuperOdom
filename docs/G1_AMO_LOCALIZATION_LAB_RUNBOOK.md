@@ -140,12 +140,13 @@ verbal estimate.
 
 ## 0:30-0:40 — stationary canary
 
-G1-4123 compatibility gate: the current capture launcher still assumes the
-G1-2296 path `/home/unitree/G1_localization` and offboard `/livox/*` topics.
-G1-4123 exposes Gio's checkout at `/home/unitree/geo-179/G1_localization` and
-native `/utlidar/cloud_livox_mid360` plus `/utlidar/imu_livox_mid360`. Do not
-run the command below until the passive capture adapter is updated and its dry
-run names those G1-4123 paths/topics.
+The passive capture adapter is configured for G1-4123: Gio's checkout at
+`/home/unitree/geo-179/G1_localization`, ROS domain `0`, native
+`/utlidar/cloud_livox_mid360` plus `/utlidar/imu_livox_mid360`, and the
+`egonav-deploy` Miniforge interpreter for the subscriber-only lowstate relay.
+It consumes the robot's existing native LiDAR publishers and does not launch a
+duplicate Livox driver. Keep RGB-D explicitly disabled for the localization
+canary unless a separately qualified vision source is available.
 
 Keep the G1 upright and still for the entire 30 seconds:
 
@@ -159,7 +160,8 @@ scripts/run_g1_motive_dataset.sh \
   --rigid-body-id "$G1_4123_RB_ID" \
   --rigid-body-name "$G1_4123_RB_NAME" \
   --motive-server 172.24.68.77 \
-  --motive-connection multicast
+  --motive-connection multicast \
+  --vision-mode disabled
 ```
 
 Require Motive tracking coverage at least 95%, nonempty LiDAR and Livox IMU,

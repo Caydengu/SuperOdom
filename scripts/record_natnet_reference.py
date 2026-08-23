@@ -190,7 +190,14 @@ def main() -> int:
     if args.summary.exists():
         raise FileExistsError(args.summary)
 
-    sys.path.insert(0, str(args.sdk_root.resolve()))
+    sdk_root = args.sdk_root.resolve()
+    package_root = sdk_root / "mocap_utils"
+    if not package_root.is_dir():
+        raise FileNotFoundError(f"NatNet SDK package is missing: {package_root}")
+    # NaturalPoint's Python SDK imports its sibling modules as top-level names,
+    # even when natnet_client itself is imported through the mocap_utils package.
+    sys.path.insert(0, str(package_root))
+    sys.path.insert(0, str(sdk_root))
     natnet_module = importlib.import_module("mocap_utils.natnet_client")
     client = natnet_module.NatNetClient()
     client.set_client_address(args.client_address)

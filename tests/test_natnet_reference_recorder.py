@@ -12,6 +12,12 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
+def test_recorder_supports_natnet_top_level_sibling_imports() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert 'package_root = sdk_root / "mocap_utils"' in source
+    assert "sys.path.insert(0, str(package_root))" in source
+
+
 def test_frame_record_preserves_native_motive_contract() -> None:
     body = SimpleNamespace(
         id_num=17,
