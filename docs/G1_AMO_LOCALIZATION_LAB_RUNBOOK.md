@@ -138,6 +138,12 @@ right hip-pitch joint origins; those origins are at lateral `+/-64.452 mm` and
 physical surfaces used. A ruler visible in each photograph is better than a
 verbal estimate.
 
+The asset screenshot and front marker-placement photograph supplied on
+2026-08-22 are preserved under
+`research/perceptive-humanoid-diffusion/calibration/g1-4123/motive/2026-08-22/`.
+They verify asset identity and physical placement, but not the metric
+rigid-body-to-URDF-pelvis transform.
+
 ## 0:30-0:40 — stationary canary
 
 The passive capture adapter is configured for G1-4123: Gio's checkout at
