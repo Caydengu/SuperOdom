@@ -13,6 +13,9 @@ from g1_root_state_bridge.protocol import (
     ROOT_STATE_V2_NUM_BYTES,
     RootStateHealth,
 )
+from g1_root_state_bridge.waist_kinematics import (
+    sensor_local_pose_to_pelvis_local_pose,
+)
 
 
 class FakeRegistration:
@@ -62,6 +65,21 @@ def test_pipeline_builds_strict_packet_from_bracketed_sources() -> None:
     assert output.source_joint_sequence == 22
     assert output.source_joint_time_ns == start + 100_000_000
     np.testing.assert_allclose(output.local_T_pelvis, np.eye(4), atol=1e-12)
+    expected_sensor = pipeline._pelvis0_T_sensor0
+    expected_cloud = (
+        np.tile(np.asarray(((1.0, 0.0, 0.0),)), (20, 1))
+        @ expected_sensor[:3, :3].T
+        + expected_sensor[:3, 3]
+    )
+    np.testing.assert_allclose(
+        output.registered_points_local_xyz_m,
+        expected_cloud,
+        atol=1e-12,
+    )
+    packed = np.frombuffer(output.registered_cloud_xyz32, dtype="<f4").reshape(-1, 3)
+    np.testing.assert_allclose(packed, expected_cloud, rtol=1e-6, atol=1e-6)
+    assert output.stage_runtime_ms["cloud_transform"] >= 0.0
+    assert output.stage_runtime_ms["cloud_pack"] >= 0.0
 
 
 def test_replay_publish_offset_includes_measured_processing_time() -> None:
@@ -109,6 +127,45 @@ def test_pipeline_keeps_native_translation_and_uses_livox_yaw() -> None:
     assert first.packet.position[0] == pytest.approx(0.0, abs=1e-12)
     assert second.packet.position[0] > 0.09
     assert second.packet.quaternion_wxyz[3] > 0.0
+
+
+def test_registered_cloud_and_root_translation_share_initial_pelvis_frame() -> None:
+    pipeline = SelectedLocalizationPipeline(
+        FakeRegistration(), LiveLocalizationConfig(gyro_bias_radps=(0.0, 0.0, 0.0))
+    )
+    start = 2_250_000_000
+    for index in range(61):
+        stamp = start - 10_000_000 + index * 5_000_000
+        pipeline.append_imu(stamp, np.zeros(3))
+        pipeline.append_joint(_joint(stamp, index))
+    points = np.tile(np.asarray(((1.0, 0.0, 0.0),)), (20, 1))
+    pipeline.process_scan(
+        points,
+        np.linspace(0.0, 0.1, 20),
+        scan_start_time_ns=start,
+        publish_time_ns=start + 120_000_000,
+    )
+    second = pipeline.process_scan(
+        points,
+        np.linspace(0.0, 0.1, 20),
+        scan_start_time_ns=start + 100_000_000,
+        publish_time_ns=start + 220_000_000,
+    )
+    sensor_pose = np.eye(4)
+    sensor_pose[0, 3] = 0.1
+    local_T_sensor = pipeline._pelvis0_T_sensor0 @ sensor_pose
+    expected_cloud = points @ local_T_sensor[:3, :3].T + local_T_sensor[:3, 3]
+    np.testing.assert_allclose(
+        second.registered_points_local_xyz_m,
+        expected_cloud,
+        atol=1e-12,
+    )
+    expected_pelvis = sensor_local_pose_to_pelvis_local_pose(
+        sensor_pose,
+        pelvis0_T_sensor0=pipeline._pelvis0_T_sensor0,
+        pelvis_t_T_sensor_t=pipeline._pelvis0_T_sensor0,
+    )
+    np.testing.assert_allclose(second.local_T_pelvis[:3, 3], expected_pelvis[:3, 3])
 
 
 def test_navigation_heading_does_not_subtract_waist_yaw() -> None:

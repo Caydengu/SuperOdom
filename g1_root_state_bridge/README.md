@@ -10,7 +10,9 @@ This ROS 2 package implements the selected G1-4123 localization producer:
 6. transform the Mid-360 trajectory to the pelvis using timestamped waist joints;
 7. keep the KISS/dynamic-FK pelvis position and replace only orientation with
    bias/sign-corrected Livox torso/navigation yaw;
-8. emit ROS odometry and the fixed 176-byte `HSROOT02` packet.
+8. emit ROS odometry, the fixed 176-byte `HSROOT02` packet, and the same
+   deskewed scan transformed into the initial-pelvis `kiss_local` frame for the
+   slow structural-map lane.
 
 The node is structurally command-incapable. LowState arrives through the
 subscriber-only `g1-dynamic-capture-relay`; no Unitree command topic or channel
@@ -24,7 +26,12 @@ exists in the localization process.
 | Livox IMU | `/utlidar/imu_livox_mid360` | `sensor_msgs/Imu`, source header time, 3-axis angular velocity |
 | LowState | UDP 5589 | CRC-protected `HSDYN001`, 29 measured joints, source epoch and robot callback time |
 
-Outputs are `/g1/localization/pelvis_odom` and ZMQ PUB `tcp://*:5575`.
+Outputs are `/g1/localization/pelvis_odom`,
+`/g1/localization/cloud_registered`, and ZMQ PUB `tcp://*:5575`. The odometry
+and registered cloud share the exact `kiss_local` frame and physical estimate
+timestamp. Map ICP must consume this registered cloud; Gio's legacy
+`/cloud_registered` belongs to a different estimator frame and must not be
+composed with `HSROOT02`.
 The heading is the mixed 2D robot-vlm convention: it does not subtract waist
 yaw, and it does not claim to be the full rigid pelvis orientation. Reheading
 KISS translation increments and subtracting waist yaw were both rejected by

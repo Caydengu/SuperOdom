@@ -8,6 +8,7 @@ def test_live_node_uses_deployed_topics_and_has_no_unitree_command_surface() -> 
     source = (ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py").read_text()
     assert "/utlidar/cloud_livox_mid360" in source
     assert "/utlidar/imu_livox_mid360" in source
+    assert "/g1/localization/cloud_registered" in source
     assert "tcp://*:5575" in source
     assert "ChannelPublisher" not in source
     assert "rt/lowcmd" not in source
@@ -27,6 +28,15 @@ def test_live_node_discards_cross_epoch_scans_and_survives_zmq_backpressure() ->
     assert "queued_epoch != self.pipeline_epoch" in source
     assert "except zmq.Again" in source
     assert 'self.stats["transport_rejected"] += 1' in source
+
+
+def test_live_node_publishes_map_evidence_in_the_kiss_local_frame() -> None:
+    source = (ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py").read_text()
+    assert "output.registered_points_local_xyz_m" in source
+    assert "output.registered_cloud_xyz32" in source
+    assert 'cloud.header.frame_id = "kiss_local"' in source
+    assert "packet.estimate_time_ns" in source
+    assert "PointField.FLOAT32" in source
 
 
 def test_transient_clock_delay_drops_sample_without_resetting_local_map() -> None:

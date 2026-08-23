@@ -89,6 +89,8 @@ class PipelineOutput:
     packet: RootStatePacketV2
     payload: bytes
     local_T_pelvis: np.ndarray
+    registered_points_local_xyz_m: np.ndarray
+    registered_cloud_xyz32: bytes
     adaptive_threshold: float
     deskew_angular_excursion_deg: float
     source_joint_sequence: int
@@ -296,6 +298,19 @@ class SelectedLocalizationPipeline:
         local_T_pelvis = _compose_navigation_pose(native_pelvis_pose, navigation_yaw)
         fusion_ms = (time.perf_counter_ns() - stage_start) * 1e-6
 
+        stage_start = time.perf_counter_ns()
+        local_T_sensor = self._pelvis0_T_sensor0 @ registration.sensor0_T_sensor
+        registered_points_local = (
+            deskewed @ local_T_sensor[:3, :3].T + local_T_sensor[:3, 3]
+        )
+        cloud_transform_ms = (time.perf_counter_ns() - stage_start) * 1e-6
+
+        stage_start = time.perf_counter_ns()
+        registered_cloud_xyz32 = np.ascontiguousarray(
+            registered_points_local, dtype="<f4"
+        ).tobytes(order="C")
+        cloud_pack_ms = (time.perf_counter_ns() - stage_start) * 1e-6
+
         if publish_time_offset_ns is not None:
             processing_so_far_ns = time.perf_counter_ns() - total_start
             publish_ns = estimate_time_ns + publish_time_offset_ns + processing_so_far_ns
@@ -327,6 +342,8 @@ class SelectedLocalizationPipeline:
             packet=packet,
             payload=payload,
             local_T_pelvis=local_T_pelvis,
+            registered_points_local_xyz_m=registered_points_local,
+            registered_cloud_xyz32=registered_cloud_xyz32,
             adaptive_threshold=registration.adaptive_threshold,
             deskew_angular_excursion_deg=excursion_deg,
             source_joint_sequence=synchronized.representative_sequence,
@@ -336,6 +353,8 @@ class SelectedLocalizationPipeline:
                 "registration": registration.runtime_ms,
                 "registration_wall": registration_wall_ms,
                 "fk_heading": fusion_ms,
+                "cloud_transform": cloud_transform_ms,
+                "cloud_pack": cloud_pack_ms,
                 "pack": pack_ms,
                 "total": total_ms,
             },

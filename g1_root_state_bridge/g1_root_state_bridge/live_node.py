@@ -34,6 +34,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lidar-topic", default="/utlidar/cloud_livox_mid360")
     parser.add_argument("--imu-topic", default="/utlidar/imu_livox_mid360")
     parser.add_argument("--odom-topic", default="/g1/localization/pelvis_odom")
+    parser.add_argument(
+        "--registered-cloud-topic",
+        default="/g1/localization/cloud_registered",
+    )
     parser.add_argument("--lowstate-bind-host", default="0.0.0.0")
     parser.add_argument("--lowstate-bind-port", type=int, default=5589)
     parser.add_argument("--zmq-bind", default="tcp://*:5575")
@@ -58,7 +62,7 @@ def run_node(args: argparse.Namespace) -> None:
     from nav_msgs.msg import Odometry
     from rclpy.node import Node
     from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-    from sensor_msgs.msg import Imu, PointCloud2
+    from sensor_msgs.msg import Imu, PointCloud2, PointField
     import zmq
 
     class G1KissLocalizationNode(Node):
@@ -98,6 +102,7 @@ def run_node(args: argparse.Namespace) -> None:
                 "lowstate": 0,
                 "lidar": 0,
                 "published": 0,
+                "cloud_published": 0,
                 "queue_replaced": 0,
                 "clock_rejected": 0,
                 "pipeline_rejected": 0,
@@ -113,6 +118,9 @@ def run_node(args: argparse.Namespace) -> None:
             self.create_subscription(Imu, args.imu_topic, self._imu_callback, qos)
             self.create_subscription(PointCloud2, args.lidar_topic, self._lidar_callback, qos)
             self.odom_publisher = self.create_publisher(Odometry, args.odom_topic, 1)
+            self.cloud_publisher = self.create_publisher(
+                PointCloud2, args.registered_cloud_topic, 1
+            )
             self.zmq_context = zmq.Context.instance()
             self.zmq_socket = self.zmq_context.socket(zmq.PUB)
             self.zmq_socket.setsockopt(zmq.SNDHWM, 1)
@@ -345,7 +353,25 @@ def run_node(args: argparse.Namespace) -> None:
                 message.twist.twist.linear.x, message.twist.twist.linear.y, message.twist.twist.linear.z = packet.linear_velocity
                 message.twist.twist.angular.x, message.twist.twist.angular.y, message.twist.twist.angular.z = packet.angular_velocity
                 self.odom_publisher.publish(message)
+                cloud = PointCloud2()
+                cloud.header.stamp.sec = packet.estimate_time_ns // 1_000_000_000
+                cloud.header.stamp.nanosec = packet.estimate_time_ns % 1_000_000_000
+                cloud.header.frame_id = "kiss_local"
+                cloud.height = 1
+                cloud.width = int(output.registered_points_local_xyz_m.shape[0])
+                cloud.fields = [
+                    PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+                    PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+                    PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+                ]
+                cloud.is_bigendian = False
+                cloud.point_step = 12
+                cloud.row_step = cloud.point_step * cloud.width
+                cloud.data = output.registered_cloud_xyz32
+                cloud.is_dense = True
+                self.cloud_publisher.publish(cloud)
                 self.stats["published"] += 1
+                self.stats["cloud_published"] += 1
 
         def _report(self) -> None:
             self.get_logger().info(
