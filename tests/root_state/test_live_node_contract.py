@@ -69,6 +69,7 @@ def test_setup_exposes_live_and_replay_entrypoints() -> None:
     setup = (ROOT / "g1_root_state_bridge/setup.py").read_text()
     assert "g1-kiss-live-localization" in setup
     assert "g1-kiss-localization-replay" in setup
+    assert "g1-wait-map-correction" in setup
     assert "g1_root_state_bridge.bridge_node" not in setup
 
 
@@ -173,6 +174,22 @@ def test_structural_map_shadow_launcher_is_digest_bound_and_command_incapable() 
     assert "tcp://*:$map_correction_port" in source
     assert "--read-only" in source
     assert "command_capability=structurally_unavailable" in source
+    assert "rt/lowcmd" not in source
+    assert "run_amo" not in source
+
+
+def test_layered_qualification_runs_both_lanes_and_actual_robot_vlm_probe() -> None:
+    source = (ROOT / "scripts/run_g1_layered_localization_qualification.sh").read_text()
+    assert "run_g1_kiss_live_stack.sh" in source
+    assert "run_g1_structural_map_shadow.sh" in source
+    assert "g1-wait-map-correction" in source
+    assert "--network host" in source
+    assert "--read-only" in source
+    assert "probe_layered_localization.py" in source
+    assert "--expected-map present" in source
+    assert "command_capability" in source
+    assert "structurally_unavailable" in source
+    assert "hardware_actuation_clearance" in source
     assert "rt/lowcmd" not in source
     assert "run_amo" not in source
 

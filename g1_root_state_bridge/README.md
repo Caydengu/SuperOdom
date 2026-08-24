@@ -110,3 +110,25 @@ The selected map key is `map_xy_all_5cm`. Global initialization accumulates a
 over a five-second window. `HSROOT02` remains the independent fast local lane
 on port 5575, while this slow lane publishes `RVMAP001` on port 5577. Motive is
 never an online input.
+
+## Complete stationary two-lane qualification
+
+The final non-commanding integration gate is one bounded command. It starts the
+local and map producers, waits for fresh identity-matched packets from both,
+and then invokes robot-vlm's actual consumer with `--expected-map present`:
+
+```bash
+scripts/run_g1_layered_localization_qualification.sh \
+  --run-dir <new-run-directory> \
+  --network-interface <offboard-G1-NIC> \
+  --map <polycam-fieldbay-structural.npz> \
+  --map-sha256 8a4aa14ddf10e575459a528f1a213b895c025cefa1388e10e3c2c8f7811c5bb7 \
+  --robot-vlm-repo <robot-vlm-checkout>
+```
+
+Keep the G1 stationary through the initial five-second gyro calibration and
+the ten-second map window. The harness records exact commits, image and map
+digests, readiness packets, component logs, the robot-vlm report, and a final
+`validation.json`. It contains no policy launch or Unitree command publisher;
+Motive is unnecessary because this gate qualifies live transport and
+composition rather than localization accuracy.
