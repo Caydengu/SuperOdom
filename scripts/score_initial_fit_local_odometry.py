@@ -30,6 +30,27 @@ def _load(path: Path, treatment: str) -> list[dict[str, object]]:
     return records
 
 
+def _load_odometry(path: Path, topic: str) -> list[dict[str, object]]:
+    """Load the stable JSONL emitted by ``export_odometry_tracks.py``."""
+
+    records: list[dict[str, object]] = []
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            row = json.loads(line)
+            if row.get("kind") != "odometry" or row.get("topic") != topic:
+                continue
+            records.append(
+                {
+                    "source_time_ns": row["source_time_ns"],
+                    "position_xyz_m": row["position_xyz_m"],
+                    "quaternion_xyzw": row["quaternion_xyzw"],
+                }
+            )
+    if len(records) < 2:
+        raise ValueError(f"missing odometry topic {topic!r}")
+    return records
+
+
 def _fit_rigid_row(source: np.ndarray, target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     source_mean = np.mean(source, axis=0)
     target_mean = np.mean(target, axis=0)
@@ -47,8 +68,13 @@ def _shortest(value: np.ndarray) -> np.ndarray:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--treatments", type=Path, required=True)
-    parser.add_argument("--treatment", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--treatments", type=Path)
+    source.add_argument("--odometry", type=Path)
+    parser.add_argument("--treatment")
+    parser.add_argument(
+        "--odometry-topic", default="/g1/localization/pelvis_odom"
+    )
     parser.add_argument("--motive", type=Path, required=True)
     parser.add_argument("--start-source-ns", type=int, required=True)
     parser.add_argument("--fit-duration-sec", type=float, default=10.0)
@@ -59,7 +85,14 @@ def main() -> None:
     args = parser.parse_args()
     if args.output.exists():
         raise FileExistsError(f"refusing to overwrite {args.output}")
-    records = _load(args.treatments, args.treatment)
+    if args.treatments is not None:
+        if not args.treatment:
+            parser.error("--treatment is required with --treatments")
+        records = _load(args.treatments, args.treatment)
+        treatment_label = args.treatment
+    else:
+        records = _load_odometry(args.odometry, args.odometry_topic)
+        treatment_label = f"live_odometry:{args.odometry_topic}"
     time_ns = np.asarray([row["source_time_ns"] for row in records], dtype=np.int64)
     position = np.asarray([row["position_xyz_m"] for row in records], dtype=np.float64)
     quaternion = np.asarray([row["quaternion_xyzw"] for row in records], dtype=np.float64)
@@ -102,7 +135,7 @@ def main() -> None:
         "schema": "g1_initial_fit_local_odometry_score_v1",
         "motive_role": "evaluator_only",
         "motive_online_input": False,
-        "treatment": args.treatment,
+        "treatment": treatment_label,
         "front_plane_to_pelvis_x_m": args.front_plane_to_pelvis_x_m,
         "start_source_ns": args.start_source_ns,
         "fit_duration_sec": args.fit_duration_sec,
