@@ -158,3 +158,18 @@ front-contour-to-URDF-pelvis offset is
 `5cc5c2c7a312329e3feeb2b03d3fc09fc29705bd01864f6767e51be959662420`).
 It is applied along the calibrated robot-forward yaw; applying it along raw
 Motive asset +X is incorrect when the asset axes have a yaw offset.
+
+For G1-4123 in the SRC Field Bay, the frozen 2026-08-24 map/evaluator treatment
+is packaged as one non-commanding operator command:
+
+```bash
+scripts/run_g1_4123_robot_vlm_fieldbay.sh \
+  --run-dir <new-run-directory> \
+  --capture-class stationary
+```
+
+The wrapper resolves the current G1 NIC, pins all GLB/surface/structural/raster
+identities, requires the accepted Motive-to-Polycam calibration, opens Gio's UI
+at `http://localhost:8082`, and invokes the complete integrated qualification.
+It never starts AMO; any operator-controlled policy remains a separate terminal
+and a separate physical-actuation gate.

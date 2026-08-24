@@ -216,6 +216,21 @@ def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> N
     assert "run_amo" not in source
 
 
+def test_fieldbay_wrapper_pins_the_complete_g1_4123_treatment() -> None:
+    source = (ROOT / "scripts/run_g1_4123_robot_vlm_fieldbay.sh").read_text()
+    assert "run_g1_kiss_live_verification.sh" in source
+    assert "--integrated-robot-vlm" in source
+    assert "G1_PELVIS_F_4123" in source
+    assert "--rigid-body-id 42" in source
+    assert "634e7de6eb7023b67beef8048c9b6d0aa26752641b40fe6adab34c8ce329e8cf" in source
+    assert "f2e9c375304a3ceb0dd8998d58cda861b529ee8b4668e64c5dd7cf0d6cae2fc4" in source
+    assert "3ce3af22d5eaf49d46878b8a9a07c86a7b0a132b6ba0c7ccb95487d7dc25863c" in source
+    assert "bce9bf243b9ba864e8c5a9ab41b5b18a6f45fe9fd0c835a37ec7cdcbd85c334c" in source
+    assert "--motive-map-transform" in source
+    assert "rt/lowcmd" not in source
+    assert "run_g1_amo_operator.sh" not in source
+
+
 def test_live_verification_validator_enforces_g1_4123_admission() -> None:
     source = (ROOT / "scripts/validate_g1_kiss_live_verification.py").read_text()
     assert '== "G1_PELVIS_F_4123"' in source
