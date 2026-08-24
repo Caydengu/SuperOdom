@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import queue
 import threading
 import time
+from collections import deque
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -18,15 +21,122 @@ from g1_root_state_bridge.clock_sync import (
     OnlineAffineClockMapper,
     classify_clock_estimate,
 )
-from g1_root_state_bridge.joint_contract import CANONICAL_G1_JOINT_NAMES, TimedJointSample
+from g1_root_state_bridge.joint_contract import (
+    CANONICAL_G1_JOINT_NAMES,
+    TimedJointSample,
+)
 from g1_root_state_bridge.kiss_registration import KissRegistration
 from g1_root_state_bridge.live_pipeline import (
+    ImuCoveragePending,
+    ImuSampleGap,
+    JointCoveragePending,
     LiveLocalizationConfig,
     LiveLocalizationError,
     SelectedLocalizationPipeline,
 )
-from g1_root_state_bridge.pointcloud2_adapter import decode_livox_pointcloud2, header_time_ns
+from g1_root_state_bridge.pointcloud2_adapter import (
+    decode_livox_pointcloud2,
+    header_time_ns,
+)
 from g1_root_state_bridge.udp_lowstate import DynamicLowStateReceiver
+
+
+@dataclass(frozen=True)
+class StartupGyroCalibration:
+    bias_radps: tuple[float, float, float]
+    standard_deviation_radps: tuple[float, float, float]
+    residual_norm_p95_radps: float
+    leg_velocity_rms_p95_radps: float
+    imu_sample_count: int
+    joint_sample_count: int
+
+
+class StartupGyroBiasEstimator:
+    """Admit a session-local gyro bias only during a stationary time window."""
+
+    def __init__(
+        self,
+        *,
+        duration_sec: float,
+        maximum_axis_std_radps: float,
+        maximum_leg_rms_radps: float,
+        minimum_imu_rate_hz: float = 150.0,
+        minimum_joint_rate_hz: float = 200.0,
+    ) -> None:
+        if duration_sec <= 0.0:
+            raise ValueError("startup calibration duration must be positive")
+        self.duration_ns = round(duration_sec * 1e9)
+        self.maximum_axis_std_radps = float(maximum_axis_std_radps)
+        self.maximum_leg_rms_radps = float(maximum_leg_rms_radps)
+        self.minimum_imu_samples = math.ceil(duration_sec * minimum_imu_rate_hz)
+        self.minimum_joint_samples = math.ceil(duration_sec * minimum_joint_rate_hz)
+        self.imu: deque[tuple[int, np.ndarray]] = deque()
+        self.leg_rms: deque[tuple[int, float]] = deque()
+        self.result: StartupGyroCalibration | None = None
+
+    @staticmethod
+    def _trim(values: deque[Any], cutoff_ns: int) -> None:
+        while values and int(values[0][0]) < cutoff_ns:
+            values.popleft()
+
+    def observe_leg(self, receipt_ns: int, joint_velocity: np.ndarray) -> None:
+        velocity = np.asarray(joint_velocity, dtype=np.float64)
+        if velocity.ndim != 1 or velocity.size < 12 or not np.all(np.isfinite(velocity)):
+            return
+        rms = float(np.sqrt(np.mean(velocity[:12] ** 2)))
+        self.leg_rms.append((int(receipt_ns), rms))
+        self._trim(self.leg_rms, int(receipt_ns) - self.duration_ns)
+
+    def observe_imu(
+        self,
+        source_ns: int,
+        angular_velocity_radps: np.ndarray,
+    ) -> StartupGyroCalibration | None:
+        if self.result is not None:
+            return self.result
+        angular = np.asarray(angular_velocity_radps, dtype=np.float64)
+        if angular.shape != (3,) or not np.all(np.isfinite(angular)):
+            return None
+        if self.imu and source_ns <= self.imu[-1][0]:
+            self.imu.clear()
+            return None
+        self.imu.append((int(source_ns), angular.copy()))
+        self._trim(self.imu, int(source_ns) - self.duration_ns)
+        if (
+            len(self.imu) < self.minimum_imu_samples
+            or len(self.leg_rms) < self.minimum_joint_samples
+            or self.imu[-1][0] - self.imu[0][0] < self.duration_ns * 0.98
+            or self.leg_rms[-1][0] - self.leg_rms[0][0] < self.duration_ns * 0.98
+        ):
+            return None
+        values = np.asarray([sample[1] for sample in self.imu], dtype=np.float64)
+        bias = np.mean(values, axis=0)
+        standard_deviation = np.std(values, axis=0)
+        residual_p95 = float(
+            np.quantile(np.linalg.norm(values - bias, axis=1), 0.95)
+        )
+        leg_p95 = float(
+            np.quantile(
+                np.asarray([sample[1] for sample in self.leg_rms], dtype=np.float64),
+                0.95,
+            )
+        )
+        if (
+            float(np.max(standard_deviation)) > self.maximum_axis_std_radps
+            or leg_p95 > self.maximum_leg_rms_radps
+        ):
+            return None
+        self.result = StartupGyroCalibration(
+            bias_radps=tuple(float(value) for value in bias),
+            standard_deviation_radps=tuple(
+                float(value) for value in standard_deviation
+            ),
+            residual_norm_p95_radps=residual_p95,
+            leg_velocity_rms_p95_radps=leg_p95,
+            imu_sample_count=len(self.imu),
+            joint_sample_count=len(self.leg_rms),
+        )
+        return self.result
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +152,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lowstate-bind-port", type=int, default=5589)
     parser.add_argument("--zmq-bind", default="tcp://*:5575")
     parser.add_argument("--gyro-bias-radps", nargs=3, type=float, required=True)
+    parser.add_argument("--gyro-startup-calibration-sec", type=float, default=5.0)
+    parser.add_argument(
+        "--gyro-startup-maximum-axis-std-radps",
+        type=float,
+        default=0.02,
+    )
+    parser.add_argument(
+        "--startup-maximum-leg-rms-radps",
+        type=float,
+        default=0.05,
+    )
     parser.add_argument("--voxel-size-m", type=float, default=0.15)
     parser.add_argument("--minimum-range-m", type=float, default=0.5)
     parser.add_argument("--maximum-range-m", type=float, default=15.0)
@@ -54,20 +175,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clock-minimum-samples", type=int, default=8)
     parser.add_argument("--clock-maximum-residual-p95-ms", type=float, default=5.0)
     parser.add_argument("--clock-maximum-transport-delay-ms", type=float, default=10.0)
+    parser.add_argument("--source-coverage-wait-ms", type=float, default=30.0)
     return parser.parse_args()
 
 
 def run_node(args: argparse.Namespace) -> None:
     import rclpy
+    import zmq
     from nav_msgs.msg import Odometry
     from rclpy.node import Node
     from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import Imu, PointCloud2, PointField
-    import zmq
 
     class G1KissLocalizationNode(Node):
         def __init__(self) -> None:
             super().__init__("g1_kiss_live_localization")
+            if not 0.0 < args.source_coverage_wait_ms <= 100.0:
+                raise ValueError("source coverage wait must be in (0,100] ms")
             clock_config = ClockMapConfig(
                 minimum_samples=args.clock_minimum_samples,
                 maximum_residual_p95_ns=round(
@@ -79,6 +203,12 @@ def run_node(args: argparse.Namespace) -> None:
             )
             self.imu_clock = OnlineAffineClockMapper(clock_config)
             self.lowstate_clock = OnlineAffineClockMapper(clock_config)
+            self.startup_bias = StartupGyroBiasEstimator(
+                duration_sec=args.gyro_startup_calibration_sec,
+                maximum_axis_std_radps=args.gyro_startup_maximum_axis_std_radps,
+                maximum_leg_rms_radps=args.startup_maximum_leg_rms_radps,
+            )
+            self.startup_calibration: StartupGyroCalibration | None = None
             self.pipeline = SelectedLocalizationPipeline(
                 KissRegistration(
                     voxel_size_m=args.voxel_size_m,
@@ -108,15 +238,39 @@ def run_node(args: argparse.Namespace) -> None:
                 "pipeline_rejected": 0,
                 "transport_rejected": 0,
                 "epoch_discarded": 0,
+                "imu_wait_retries": 0,
+                "imu_wait_timeouts": 0,
+                "joint_wait_retries": 0,
+                "joint_wait_timeouts": 0,
+                "imu_gap_restarts": 0,
             }
-            qos = QoSProfile(
+            self.rejection_reasons: dict[str, int] = {}
+            self.runtime_samples_ms: dict[str, deque[float]] = {}
+            self.pose_age_samples_ms: deque[float] = deque(maxlen=2_000)
+            imu_qos = QoSProfile(
                 history=HistoryPolicy.KEEP_LAST,
-                depth=1,
-                reliability=ReliabilityPolicy.BEST_EFFORT,
+                depth=64,
+                reliability=ReliabilityPolicy.RELIABLE,
                 durability=DurabilityPolicy.VOLATILE,
             )
-            self.create_subscription(Imu, args.imu_topic, self._imu_callback, qos)
-            self.create_subscription(PointCloud2, args.lidar_topic, self._lidar_callback, qos)
+            lidar_qos = QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=2,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+            )
+            self.create_subscription(
+                Imu,
+                args.imu_topic,
+                self._imu_callback,
+                imu_qos,
+            )
+            self.create_subscription(
+                PointCloud2,
+                args.lidar_topic,
+                self._lidar_callback,
+                lidar_qos,
+            )
             self.odom_publisher = self.create_publisher(Odometry, args.odom_topic, 1)
             self.cloud_publisher = self.create_publisher(
                 PointCloud2, args.registered_cloud_topic, 1
@@ -136,7 +290,11 @@ def run_node(args: argparse.Namespace) -> None:
             self.create_timer(5.0, self._report)
 
         def _activate_if_ready(self) -> None:
-            if self.active or not (self.imu_clock.valid and self.lowstate_clock.valid):
+            if (
+                self.active
+                or self.startup_calibration is None
+                or not (self.imu_clock.valid and self.lowstate_clock.valid)
+            ):
                 return
             self.pipeline_epoch += 1
             self.pipeline.reset(self.pipeline_epoch)
@@ -167,10 +325,53 @@ def run_node(args: argparse.Namespace) -> None:
                 )
             )
 
+        def _admit_startup_calibration(
+            self,
+            calibration: StartupGyroCalibration,
+        ) -> None:
+            if self.startup_calibration is not None:
+                return
+            config = LiveLocalizationConfig(
+                gyro_bias_radps=calibration.bias_radps,
+            )
+            self.pipeline = SelectedLocalizationPipeline(
+                KissRegistration(
+                    voxel_size_m=args.voxel_size_m,
+                    minimum_range_m=args.minimum_range_m,
+                    maximum_range_m=args.maximum_range_m,
+                ),
+                config,
+            )
+            self.startup_calibration = calibration
+            self.get_logger().info(
+                json.dumps(
+                    {
+                        "event": "startup_gyro_calibration_admitted",
+                        "bias_radps": calibration.bias_radps,
+                        "standard_deviation_radps": (
+                            calibration.standard_deviation_radps
+                        ),
+                        "residual_norm_p95_radps": (
+                            calibration.residual_norm_p95_radps
+                        ),
+                        "leg_velocity_rms_p95_radps": (
+                            calibration.leg_velocity_rms_p95_radps
+                        ),
+                        "imu_sample_count": calibration.imu_sample_count,
+                        "joint_sample_count": calibration.joint_sample_count,
+                        "calibration_digest": config.calibration_digest.hex(),
+                    },
+                    sort_keys=True,
+                )
+            )
+
         def _deactivate(self, reason: str) -> None:
             if self.active:
                 self.get_logger().error(json.dumps({"event": "localization_deactivated", "reason": reason}))
             self.active = False
+
+        def _record_rejection(self, reason: str) -> None:
+            self.rejection_reasons[reason] = self.rejection_reasons.get(reason, 0) + 1
 
         def _observe_clock(
             self,
@@ -198,7 +399,18 @@ def run_node(args: argparse.Namespace) -> None:
                 self.stats["clock_rejected"] += 1
                 self._deactivate("imu_header_time_invalid")
                 return
+            angular = np.asarray(
+                (
+                    message.angular_velocity.x,
+                    message.angular_velocity.y,
+                    message.angular_velocity.z,
+                ),
+                dtype=np.float64,
+            )
             with self.lock:
+                calibration = self.startup_bias.observe_imu(source_ns, angular)
+                if calibration is not None:
+                    self._admit_startup_calibration(calibration)
                 previous_epoch = self.imu_clock.source_epoch
                 estimate = self._observe_clock(
                     self.imu_clock, source_ns, receipt_ns, stream="imu"
@@ -216,22 +428,30 @@ def run_node(args: argparse.Namespace) -> None:
                 if not self.active or disposition is not ClockSampleDisposition.ACCEPT:
                     self.stats["clock_rejected"] += 1
                     return
-                angular = np.asarray(
-                    (
-                        message.angular_velocity.x,
-                        message.angular_velocity.y,
-                        message.angular_velocity.z,
-                    ),
-                    dtype=np.float64,
-                )
                 try:
                     self.pipeline.append_imu(estimate.mapped_time_ns, angular)
                     self.stats["imu"] += 1
-                except LiveLocalizationError:
-                    self._deactivate("imu_pipeline_contract")
+                except ImuSampleGap as error:
+                    self.pipeline.restart_imu_after_gap(
+                        estimate.mapped_time_ns,
+                        angular,
+                    )
+                    self.stats["imu"] += 1
+                    self.stats["imu_gap_restarts"] += 1
+                    self._record_rejection(
+                        f"imu_pipeline_transient_gap_restart:{error.gap_ns}ns"
+                    )
+                except LiveLocalizationError as error:
+                    reason = f"imu_pipeline_contract:{error}"
+                    self._record_rejection(reason)
+                    self._deactivate(reason)
 
         def _lowstate_callback(self, packet: Any, receipt_ns: int) -> None:
             with self.lock:
+                self.startup_bias.observe_leg(
+                    receipt_ns,
+                    np.asarray(packet.joint_velocity, dtype=np.float64),
+                )
                 if self.lowstate_source_epoch is None:
                     self.lowstate_source_epoch = int(packet.source_epoch)
                 elif int(packet.source_epoch) != self.lowstate_source_epoch:
@@ -270,7 +490,8 @@ def run_node(args: argparse.Namespace) -> None:
                 try:
                     self.pipeline.append_joint(sample)
                     self.stats["lowstate"] += 1
-                except ValueError:
+                except ValueError as error:
+                    self._record_rejection(f"lowstate_pipeline_contract:{error}")
                     self._deactivate("lowstate_pipeline_contract")
 
         def _lidar_callback(self, message: Any) -> None:
@@ -299,8 +520,9 @@ def run_node(args: argparse.Namespace) -> None:
                     maximum_points=args.maximum_points,
                     time_unit=args.point_time_unit,
                 )
-            except ValueError:
+            except ValueError as error:
                 self.stats["pipeline_rejected"] += 1
+                self._record_rejection(f"pointcloud_decode:{error}")
                 return
             item = (queued_epoch, points, relative, mapped_start_ns)
             try:
@@ -320,20 +542,59 @@ def run_node(args: argparse.Namespace) -> None:
                     queued_epoch, points, relative, start_ns = self.scan_queue.get(timeout=0.2)
                 except queue.Empty:
                     continue
-                with self.lock:
-                    if not self.active or queued_epoch != self.pipeline_epoch:
-                        self.stats["epoch_discarded"] += 1
-                        continue
-                    try:
-                        output = self.pipeline.process_scan(
-                            points,
-                            relative,
-                            scan_start_time_ns=start_ns,
-                            clock_valid=self.imu_clock.valid and self.lowstate_clock.valid,
-                        )
-                    except LiveLocalizationError:
-                        self.stats["pipeline_rejected"] += 1
-                        continue
+                wait_deadline_ns = time.monotonic_ns() + round(
+                    args.source_coverage_wait_ms * 1e6
+                )
+                output = None
+                while not self.stop_event.is_set():
+                    pending_source: str | None = None
+                    with self.lock:
+                        if not self.active or queued_epoch != self.pipeline_epoch:
+                            self.stats["epoch_discarded"] += 1
+                            break
+                        try:
+                            self.pipeline.assert_scan_sources_ready(
+                                relative,
+                                scan_start_time_ns=start_ns,
+                            )
+                            output = self.pipeline.process_scan(
+                                points,
+                                relative,
+                                scan_start_time_ns=start_ns,
+                                clock_valid=self.imu_clock.valid
+                                and self.lowstate_clock.valid,
+                            )
+                        except ImuCoveragePending:
+                            pending_source = "imu"
+                        except JointCoveragePending:
+                            pending_source = "joint"
+                        except LiveLocalizationError as error:
+                            self.stats["pipeline_rejected"] += 1
+                            self._record_rejection(f"scan_pipeline:{error}")
+                            break
+                    if pending_source is None:
+                        break
+                    if time.monotonic_ns() >= wait_deadline_ns:
+                        with self.lock:
+                            self.stats["pipeline_rejected"] += 1
+                            self.stats[f"{pending_source}_wait_timeouts"] += 1
+                            self._record_rejection(
+                                f"scan_pipeline:{pending_source} coverage wait timed out"
+                            )
+                        break
+                    self.stats[f"{pending_source}_wait_retries"] += 1
+                    self.stop_event.wait(0.001)
+                if output is None:
+                    continue
+                for stage, runtime_ms in output.stage_runtime_ms.items():
+                    self.runtime_samples_ms.setdefault(
+                        stage,
+                        deque(maxlen=2_000),
+                    ).append(float(runtime_ms))
+                self.pose_age_samples_ms.append(
+                    (output.packet.publish_time_ns - output.packet.estimate_time_ns)
+                    * 1e-6
+                )
                 try:
                     self.zmq_socket.send(output.payload, flags=zmq.NOBLOCK)
                 except zmq.Again:
@@ -374,6 +635,17 @@ def run_node(args: argparse.Namespace) -> None:
                 self.stats["cloud_published"] += 1
 
         def _report(self) -> None:
+            def quantiles(values: deque[float]) -> dict[str, float]:
+                array = np.asarray(values, dtype=np.float64)
+                if array.size == 0:
+                    return {}
+                return {
+                    "p50": float(np.quantile(array, 0.50)),
+                    "p95": float(np.quantile(array, 0.95)),
+                    "p99": float(np.quantile(array, 0.99)),
+                    "maximum": float(np.max(array)),
+                }
+
             self.get_logger().info(
                 json.dumps(
                     {
@@ -381,6 +653,34 @@ def run_node(args: argparse.Namespace) -> None:
                         "active": self.active,
                         "pipeline_epoch": self.pipeline_epoch,
                         "stats": self.stats,
+                        "rejection_reasons": self.rejection_reasons,
+                        "stage_runtime_ms": {
+                            stage: quantiles(values)
+                            for stage, values in sorted(self.runtime_samples_ms.items())
+                        },
+                        "pose_age_ms": quantiles(self.pose_age_samples_ms),
+                        "startup_calibration": (
+                            None
+                            if self.startup_calibration is None
+                            else {
+                                "bias_radps": self.startup_calibration.bias_radps,
+                                "standard_deviation_radps": (
+                                    self.startup_calibration.standard_deviation_radps
+                                ),
+                                "residual_norm_p95_radps": (
+                                    self.startup_calibration.residual_norm_p95_radps
+                                ),
+                                "leg_velocity_rms_p95_radps": (
+                                    self.startup_calibration.leg_velocity_rms_p95_radps
+                                ),
+                                "imu_sample_count": (
+                                    self.startup_calibration.imu_sample_count
+                                ),
+                                "joint_sample_count": (
+                                    self.startup_calibration.joint_sample_count
+                                ),
+                            }
+                        ),
                         "lowstate_udp_invalid": self.lowstate_receiver.invalid,
                         "command_capability": "structurally_unavailable",
                     },
@@ -398,10 +698,13 @@ def run_node(args: argparse.Namespace) -> None:
     node = G1KissLocalizationNode()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.close()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 def main() -> None:

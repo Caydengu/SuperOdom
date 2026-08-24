@@ -66,6 +66,13 @@ class JointBuffer:
         """Discard all samples after an estimator/source reset."""
         self._samples.clear()
 
+    @property
+    def time_bounds_ns(self) -> tuple[int, int] | None:
+        """Return the admitted source-time interval without exposing samples."""
+        if not self._samples:
+            return None
+        return self._samples[0].stamp_ns, self._samples[-1].stamp_ns
+
     def interpolate(self, query_ns: int, max_gap_ns: int) -> TimedJointSample:
         """Linearly interpolate a bracketed sample within the declared gap."""
         return self.synchronize(query_ns, max_gap_ns).sample

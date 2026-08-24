@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass
-from hashlib import sha256
 import json
 import math
 import time
+from collections import deque
+from dataclasses import dataclass
+from hashlib import sha256
 from typing import Protocol
 
 import numpy as np
 
 from g1_root_state_bridge.joint_buffer import JointBuffer, JointSynchronizationError
-from g1_root_state_bridge.joint_contract import CANONICAL_G1_JOINT_NAMES, TimedJointSample
+from g1_root_state_bridge.joint_contract import (
+    CANONICAL_G1_JOINT_NAMES,
+    TimedJointSample,
+)
 from g1_root_state_bridge.kiss_pelvis_local_odometry import (
     KissPelvisHealthConfig,
     KissPelvisObservation,
@@ -30,6 +33,30 @@ from g1_root_state_bridge.waist_kinematics import (
 
 class LiveLocalizationError(RuntimeError):
     """The live-shaped pipeline cannot produce a trustworthy state."""
+
+
+class ImuCoveragePending(LiveLocalizationError):
+    """The scan end is newer than the latest admitted IMU sample."""
+
+    def __init__(self, missing_ns: int) -> None:
+        super().__init__("IMU buffer ends before the scan")
+        self.missing_ns = int(missing_ns)
+
+
+class ImuSampleGap(LiveLocalizationError):
+    """Two admitted IMU samples exceed the deskew continuity limit."""
+
+    def __init__(self, gap_ns: int) -> None:
+        super().__init__("IMU gap exceeds the fail-closed limit")
+        self.gap_ns = int(gap_ns)
+
+
+class JointCoveragePending(LiveLocalizationError):
+    """The scan estimate time is newer than the latest admitted joint sample."""
+
+    def __init__(self, missing_ns: int) -> None:
+        super().__init__("joint buffer ends before the scan")
+        self.missing_ns = int(missing_ns)
 
 
 class RegistrationBackend(Protocol):
@@ -120,10 +147,24 @@ class _ImuYawBuffer:
                 raise LiveLocalizationError("IMU timestamp did not increase")
             gap_ns = time_ns - previous_time
             if gap_ns > self._maximum_gap_ns:
-                raise LiveLocalizationError("IMU gap exceeds the fail-closed limit")
+                raise ImuSampleGap(gap_ns)
             previous_rate = self._sign * (previous_angular[2] - self._bias_z)
             current_rate = self._sign * (angular[2] - self._bias_z)
             self._torso_yaw += 0.5 * (previous_rate + current_rate) * gap_ns * 1e-9
+        self._samples.append((time_ns, angular.copy(), self._torso_yaw))
+
+    def restart_after_gap(
+        self,
+        time_ns: int,
+        angular_velocity_radps: np.ndarray,
+    ) -> None:
+        """Start a new deskew interval while preserving accumulated heading."""
+        angular = np.asarray(angular_velocity_radps, dtype=np.float64)
+        if not isinstance(time_ns, int) or time_ns <= 0 or angular.shape != (3,):
+            raise LiveLocalizationError("IMU restart sample is invalid")
+        if not np.all(np.isfinite(angular)):
+            raise LiveLocalizationError("IMU restart sample is invalid")
+        self._samples.clear()
         self._samples.append((time_ns, angular.copy(), self._torso_yaw))
 
     def arrays_for_scan(self, start_time_ns: int, end_time_ns: int) -> tuple[np.ndarray, np.ndarray]:
@@ -133,8 +174,10 @@ class _ImuYawBuffer:
         time_values = np.asarray([sample[0] for sample in values], dtype=np.int64)
         before = np.searchsorted(time_values, start_time_ns, side="right") - 1
         after = np.searchsorted(time_values, end_time_ns, side="left")
-        if before < 0 or after >= len(values):
-            raise LiveLocalizationError("IMU buffer does not bracket the scan")
+        if before < 0:
+            raise LiveLocalizationError("IMU buffer starts after the scan")
+        if after >= len(values):
+            raise ImuCoveragePending(end_time_ns - int(time_values[-1]))
         selected = values[before : after + 1]
         return (
             np.asarray([sample[0] for sample in selected], dtype=np.int64),
@@ -219,6 +262,14 @@ class SelectedLocalizationPipeline:
     def append_imu(self, time_ns: int, angular_velocity_radps: np.ndarray) -> None:
         self.imu.append(time_ns, angular_velocity_radps)
 
+    def restart_imu_after_gap(
+        self,
+        time_ns: int,
+        angular_velocity_radps: np.ndarray,
+    ) -> None:
+        """Preserve local registration and yaw across a transient IMU outage."""
+        self.imu.restart_after_gap(time_ns, angular_velocity_radps)
+
     def append_joint(self, sample: TimedJointSample) -> None:
         self.joints.append(sample)
 
@@ -236,6 +287,45 @@ class SelectedLocalizationPipeline:
         result = self.registration.register(points_xyz_m)
         self._registration_initialized = True
         return result
+
+    def assert_scan_sources_ready(
+        self,
+        point_relative_time_s: np.ndarray,
+        *,
+        scan_start_time_ns: int,
+    ) -> int:
+        """Fail or request a bounded retry before registration mutates state.
+
+        The deployed streams are asynchronous. Recorder evidence from both
+        G1-4123 stress walks shows that IMU and LowState commonly arrive just
+        after the corresponding LiDAR message. This preflight keeps those
+        expected delivery races out of KISS-ICP while preserving fail-closed
+        behavior for missing, stale, or unbracketable sources.
+        """
+
+        relative = np.asarray(point_relative_time_s, dtype=np.float64)
+        if relative.ndim != 1 or relative.size == 0 or not np.all(np.isfinite(relative)):
+            raise LiveLocalizationError("point-relative times must be a non-empty finite vector")
+        scan_end_time_ns = int(
+            scan_start_time_ns + round(float(np.max(relative)) * 1e9)
+        )
+        self.imu.arrays_for_scan(scan_start_time_ns, scan_end_time_ns)
+        joint_bounds = self.joints.time_bounds_ns
+        if joint_bounds is None:
+            raise LiveLocalizationError("joint buffer is empty")
+        joint_start_ns, joint_end_ns = joint_bounds
+        if scan_end_time_ns < joint_start_ns:
+            raise LiveLocalizationError("joint buffer starts after the scan")
+        if scan_end_time_ns > joint_end_ns:
+            raise JointCoveragePending(scan_end_time_ns - joint_end_ns)
+        try:
+            self.joints.synchronize(
+                scan_end_time_ns,
+                self.config.maximum_joint_gap_ns,
+            )
+        except JointSynchronizationError as error:
+            raise LiveLocalizationError(str(error)) from error
+        return scan_end_time_ns
 
     def process_scan(
         self,
@@ -255,7 +345,10 @@ class SelectedLocalizationPipeline:
         if publish_time_offset_ns is not None and publish_time_offset_ns < 0:
             raise LiveLocalizationError("publish time offset must be non-negative")
         total_start = time.perf_counter_ns()
-        scan_end_time_ns = int(scan_start_time_ns + round(float(np.max(point_relative_time_s)) * 1e9))
+        scan_end_time_ns = self.assert_scan_sources_ready(
+            point_relative_time_s,
+            scan_start_time_ns=scan_start_time_ns,
+        )
         imu_time_ns, imu_angular = self.imu.arrays_for_scan(scan_start_time_ns, scan_end_time_ns)
         stage_start = time.perf_counter_ns()
         try:

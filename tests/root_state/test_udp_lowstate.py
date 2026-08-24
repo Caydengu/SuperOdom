@@ -44,5 +44,7 @@ def test_udp_receiver_accepts_only_valid_read_only_packet() -> None:
     sender.close()
     receiver.close()
     assert len(received) == 1
-    assert received[0][0] == packet
+    assert serialize_dynamic_capture_packet(received[0][0]) == (
+        serialize_dynamic_capture_packet(packet)
+    )
     assert receiver.invalid == 0

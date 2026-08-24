@@ -1,7 +1,54 @@
 from pathlib import Path
 
+import numpy as np
+from g1_root_state_bridge.live_node import StartupGyroBiasEstimator
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_startup_gyro_bias_requires_a_stationary_five_second_window() -> None:
+    estimator = StartupGyroBiasEstimator(
+        duration_sec=5.0,
+        maximum_axis_std_radps=0.02,
+        maximum_leg_rms_radps=0.05,
+    )
+    bias = np.asarray((0.025, -0.021, -0.015), dtype=np.float64)
+    result = None
+    for index in range(1_001):
+        offset_ns = index * 5_000_000
+        estimator.observe_leg(
+            1_000_000_000_000 + offset_ns,
+            np.zeros(29, dtype=np.float64),
+        )
+        noise = 0.001 * np.sin(index * 0.1)
+        result = estimator.observe_imu(
+            2_000_000_000_000 + offset_ns,
+            bias + np.asarray((noise, -noise, noise)),
+        )
+    assert result is not None
+    np.testing.assert_allclose(result.bias_radps, bias, atol=1e-4)
+    assert result.imu_sample_count >= 1_000
+    assert result.joint_sample_count >= 1_000
+
+
+def test_startup_gyro_bias_rejects_a_moving_leg_window() -> None:
+    estimator = StartupGyroBiasEstimator(
+        duration_sec=5.0,
+        maximum_axis_std_radps=0.02,
+        maximum_leg_rms_radps=0.05,
+    )
+    result = None
+    for index in range(1_001):
+        offset_ns = index * 5_000_000
+        estimator.observe_leg(
+            1_000_000_000_000 + offset_ns,
+            np.full(29, 0.1, dtype=np.float64),
+        )
+        result = estimator.observe_imu(
+            2_000_000_000_000 + offset_ns,
+            np.asarray((0.025, -0.021, -0.015)),
+        )
+    assert result is None
 
 
 def test_live_node_uses_deployed_topics_and_has_no_unitree_command_surface() -> None:
@@ -23,11 +70,48 @@ def test_setup_exposes_live_and_replay_entrypoints() -> None:
     assert "g1_root_state_bridge.bridge_node" not in setup
 
 
+def test_container_entrypoint_sources_ros_with_nounset_disabled() -> None:
+    source = (ROOT / "docker/kiss-live/entrypoint.sh").read_text()
+    disable_nounset = source.index("set +u")
+    source_ros = source.index("source /opt/ros/humble/setup.bash")
+    source_workspace = source.index("source /opt/g1_localization_ws/install/setup.bash")
+    restore_nounset = source.index("set -u", source_workspace)
+    assert disable_nounset < source_ros < source_workspace < restore_nounset
+    assert (
+        'export PATH="/opt/g1_localization_ws/install/lib/g1_root_state_bridge:$PATH"'
+        in source
+    )
+
+
 def test_live_node_discards_cross_epoch_scans_and_survives_zmq_backpressure() -> None:
     source = (ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py").read_text()
     assert "queued_epoch != self.pipeline_epoch" in source
     assert "except zmq.Again" in source
     assert 'self.stats["transport_rejected"] += 1' in source
+    assert '"rejection_reasons": self.rejection_reasons' in source
+    assert "scan_pipeline:{error}" in source
+    assert "except ImuCoveragePending:" in source
+    assert "except JointCoveragePending:" in source
+    assert "coverage wait timed out" in source
+    assert "--source-coverage-wait-ms" in source
+    assert "assert_scan_sources_ready" in source
+    assert '"stage_runtime_ms"' in source
+    assert '"pose_age_ms"' in source
+
+
+def test_live_node_matches_the_recorded_reliable_sensor_publishers() -> None:
+    source = (ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py").read_text()
+    assert "imu_qos = QoSProfile" in source
+    assert "lidar_qos = QoSProfile" in source
+    assert source.count("reliability=ReliabilityPolicy.RELIABLE") >= 2
+    assert "depth=64" in source
+
+
+def test_live_node_shutdown_is_idempotent_after_sigint() -> None:
+    source = (ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py").read_text()
+    assert "except KeyboardInterrupt:" in source
+    assert "if rclpy.ok():" in source
+    assert "rclpy.shutdown()" in source
 
 
 def test_live_node_publishes_map_evidence_in_the_kiss_local_frame() -> None:
@@ -54,6 +138,32 @@ def test_passive_launcher_names_no_policy_or_command_channel() -> None:
     assert "rt/lowcmd" not in source
     assert "run_amo" not in source
     assert "command_capability=structurally_unavailable" in source
+
+
+def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> None:
+    source = (ROOT / "scripts/run_g1_kiss_live_verification.sh").read_text()
+    assert "record_natnet_reference.py" in source
+    assert "g1_dynamic_capture_recorder" in source
+    assert "/utlidar/cloud_livox_mid360" in source
+    assert "/utlidar/imu_livox_mid360" in source
+    assert "/g1/localization/pelvis_odom" in source
+    assert "/g1/localization/cloud_registered" in source
+    assert "G1_PELVIS_F_4123" in source
+    assert "rigid_body_id=42" in source
+    assert "actuation_publishers_created" in source
+    assert "rt/lowcmd" not in source
+    assert "run_amo" not in source
+
+
+def test_live_verification_validator_enforces_g1_4123_admission() -> None:
+    source = (
+        ROOT / "scripts/validate_g1_kiss_live_verification.py"
+    ).read_text()
+    assert '== "G1_PELVIS_F_4123"' in source
+    assert "== 42" in source
+    assert '>= 0.99' in source
+    assert 'availability >= 0.95' in source
+    assert '"hardware_actuation_clearance": False' in source
 
 
 def test_offline_qualification_uses_both_frozen_stress_runs() -> None:

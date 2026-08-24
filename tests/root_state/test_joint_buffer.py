@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-
 from g1_root_state_bridge.joint_buffer import (
     JointBuffer,
     JointSynchronizationError,
 )
-from g1_root_state_bridge.joint_contract import CANONICAL_G1_JOINT_NAMES, TimedJointSample
+from g1_root_state_bridge.joint_contract import (
+    CANONICAL_G1_JOINT_NAMES,
+    TimedJointSample,
+)
 
 
 def sample(stamp_ns: int, sequence: int, offset: float) -> TimedJointSample:
@@ -37,6 +39,11 @@ def test_buffer_interpolates_position_and_velocity_inside_bracket() -> None:
     assert result.position[0] == 5.0
     assert result.position[12:15] == (17.0, 18.0, 19.0)
     assert result.velocity[0] == 10.0
+    assert buffer.time_bounds_ns == (1_000_000_000, 1_010_000_000)
+
+
+def test_empty_buffer_has_no_time_bounds() -> None:
+    assert JointBuffer(capacity=8).time_bounds_ns is None
 
 
 def test_synchronize_preserves_the_real_bracket_and_nearest_sample_gap() -> None:

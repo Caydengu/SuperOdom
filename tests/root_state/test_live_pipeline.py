@@ -1,9 +1,13 @@
 import numpy as np
 import pytest
-
-from g1_root_state_bridge.joint_contract import CANONICAL_G1_JOINT_NAMES, TimedJointSample
+from g1_root_state_bridge.joint_contract import (
+    CANONICAL_G1_JOINT_NAMES,
+    TimedJointSample,
+)
 from g1_root_state_bridge.kiss_registration import RegistrationResult
 from g1_root_state_bridge.live_pipeline import (
+    ImuCoveragePending,
+    JointCoveragePending,
     LiveLocalizationConfig,
     LiveLocalizationError,
     SelectedLocalizationPipeline,
@@ -201,6 +205,81 @@ def test_unpublished_bootstrap_advances_registration_without_packet() -> None:
     result = pipeline.bootstrap_unpublished_scan(np.ones((20, 3)))
     assert result.sensor0_T_sensor[0, 3] == 0.0
     assert registration.index == 1
+
+
+def test_scan_newer_than_latest_imu_is_a_retryable_coverage_error() -> None:
+    pipeline = SelectedLocalizationPipeline(
+        FakeRegistration(), LiveLocalizationConfig(gyro_bias_radps=(0.0, 0.0, 0.0))
+    )
+    start = 2_750_000_000
+    for index in range(20):
+        stamp = start - 10_000_000 + index * 5_000_000
+        pipeline.append_imu(stamp, np.zeros(3))
+        pipeline.append_joint(_joint(stamp, index))
+    with pytest.raises(ImuCoveragePending) as caught:
+        pipeline.process_scan(
+            np.tile(np.asarray(((1.0, 0.0, 0.0),)), (20, 1)),
+            np.linspace(0.0, 0.1, 20),
+            scan_start_time_ns=start,
+            publish_time_ns=start + 120_000_000,
+        )
+    assert caught.value.missing_ns == 15_000_000
+
+
+def test_scan_newer_than_latest_joint_is_retryable_before_registration() -> None:
+    registration = FakeRegistration()
+    pipeline = SelectedLocalizationPipeline(
+        registration, LiveLocalizationConfig(gyro_bias_radps=(0.0, 0.0, 0.0))
+    )
+    start = 2_875_000_000
+    for index in range(25):
+        stamp = start - 10_000_000 + index * 5_000_000
+        pipeline.append_imu(stamp, np.zeros(3))
+        if index < 20:
+            pipeline.append_joint(_joint(stamp, index))
+    relative = np.linspace(0.0, 0.1, 20)
+    with pytest.raises(JointCoveragePending) as caught:
+        pipeline.assert_scan_sources_ready(relative, scan_start_time_ns=start)
+    assert caught.value.missing_ns == 15_000_000
+    assert registration.index == 0
+
+
+def test_imu_gap_restart_preserves_registration_and_heading_state() -> None:
+    registration = FakeRegistration()
+    pipeline = SelectedLocalizationPipeline(
+        registration, LiveLocalizationConfig(gyro_bias_radps=(0.0, 0.0, 0.0))
+    )
+    start = 2_900_000_000
+    for index in range(10):
+        stamp = start + index * 5_000_000
+        pipeline.append_imu(stamp, np.asarray((0.0, 0.0, -1.0)))
+    pipeline.bootstrap_unpublished_scan(np.ones((20, 3)))
+    yaw_before = pipeline.imu._torso_yaw
+    pipeline.restart_imu_after_gap(
+        start + 100_000_000,
+        np.asarray((0.0, 0.0, -1.0)),
+    )
+    assert pipeline.imu._torso_yaw == yaw_before
+    assert registration.index == 1
+    assert pipeline._registration_initialized
+
+
+def test_source_preflight_admits_scan_without_advancing_registration() -> None:
+    registration = FakeRegistration()
+    pipeline = SelectedLocalizationPipeline(
+        registration, LiveLocalizationConfig(gyro_bias_radps=(0.0, 0.0, 0.0))
+    )
+    start = 2_950_000_000
+    for index in range(31):
+        stamp = start - 10_000_000 + index * 5_000_000
+        pipeline.append_imu(stamp, np.zeros(3))
+        pipeline.append_joint(_joint(stamp, index))
+    estimate_ns = pipeline.assert_scan_sources_ready(
+        np.linspace(0.0, 0.1, 20),
+        scan_start_time_ns=start,
+    )
+    assert estimate_ns == start + 100_000_000
+    assert registration.index == 0
 
 
 def test_reset_discards_registration_and_allows_one_new_bootstrap() -> None:
