@@ -92,6 +92,7 @@ motive=$motive_server client=$motive_client_address
 rigid_body=$rigid_body_name id=$rigid_body_id
 image=$image
 topics=/utlidar/cloud_livox_mid360,/utlidar/imu_livox_mid360,/g1/localization/pelvis_odom,/g1/localization/cloud_registered
+capture_readiness=first fresh and fully healthy HSROOT02 packet; robot must remain stationary until READY is printed
 command_capability=structurally_unavailable
 EOF
   exit 0
@@ -174,21 +175,42 @@ cleanup() {
       kill "$pid" 2>/dev/null || true
     fi
   done
+  for pid in "${bag_pid:-}" "${relay_pid:-}" "${lowstate_pid:-}" "${motive_pid:-}" "${live_pid:-}"; do
+    if [[ -n "$pid" ]]; then
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
 }
 trap cleanup EXIT INT TERM
 
+# The producer is intentionally fail-closed until the robot has remained
+# stationary long enough to estimate Livox gyro bias and both source-clock fits
+# are admitted.  Observe its command-incapable HSROOT02 output directly rather
+# than adding a temporary ROS DDS participant, which can itself perturb the
+# Livox stream during capture startup.
+if ! PYTHONPATH="$repo_root/g1_root_state_bridge" python3 \
+  "$script_dir/wait_for_root_state.py" \
+  --endpoint tcp://127.0.0.1:5575 \
+  --timeout-sec 12 \
+  --output "$run_dir/runtime/readiness-root-state.json" \
+  >"$run_dir/logs/readiness.log" 2>&1; then
+  echo "localization produced no synchronized root state within 12s; keep the G1 stationary and retry" >&2
+  exit 5
+fi
+python3 - "$run_dir/manifest.json" "$run_dir/runtime/readiness-root-state.json" <<'PY'
+import json, pathlib, sys, time
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+readiness = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+value["capture_ready_realtime_ns"] = time.time_ns()
+value["capture_readiness"] = "first fresh and fully healthy HSROOT02 packet"
+value["calibration_digest"] = readiness["calibration_digest"]
+value["localization_source_epoch"] = readiness["source_epoch"]
+path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+echo "READY FOR OPERATOR-CONTROLLED AMO: recording ${duration_sec}s now"
+
 cyclonedds_uri="<CycloneDDS><Domain id=\"any\"><General><Interfaces><NetworkInterface name=\"$network_interface\" /></Interfaces></General></Domain></CycloneDDS>"
-deadline=$((SECONDS + 45))
-while (( SECONDS < deadline )); do
-  output_type="$(docker run --rm --network host \
-    --env "ROS_DOMAIN_ID=$ros_domain_id" \
-    --env RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
-    --env "CYCLONEDDS_URI=$cyclonedds_uri" \
-    "$image" timeout 3s ros2 topic type /g1/localization/pelvis_odom 2>/dev/null || true)"
-  [[ "$output_type" == "nav_msgs/msg/Odometry" ]] && break
-  sleep 0.5
-done
-[[ "${output_type:-}" == "nav_msgs/msg/Odometry" ]] || { echo "live odometry topic was not discovered" >&2; exit 5; }
 
 python3 "$script_dir/record_natnet_reference.py" \
   --sdk-root "$run_dir/runtime" \

@@ -67,6 +67,8 @@ done
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
 remote_stage=/tmp/g1-kiss-live-localization
+remote_pid_file="$remote_stage/relay-${lowstate_port}.pid"
+container_name="g1-kiss-live-${BASHPID}"
 
 if [[ "$dry_run" == false ]]; then
   for command in docker ip scp ssh timeout; do
@@ -85,7 +87,7 @@ else
 fi
 
 relay_command="PYTHONPATH=$remote_stage $robot_python -m g1_root_state_bridge.g1_dynamic_capture_relay --target-host $offboard_robot_address --target-port $lowstate_port --network-interface $robot_dds_interface --domain-id 0 --duration-sec $duration_sec"
-local_command="$repo_root/docker/kiss-live/run_live.sh --network-interface $network_interface --ros-domain-id $ros_domain_id --lowstate-port $lowstate_port"
+local_command="$repo_root/docker/kiss-live/run_live.sh --network-interface $network_interface --ros-domain-id $ros_domain_id --lowstate-port $lowstate_port --container-name $container_name"
 
 if [[ "$dry_run" == true ]]; then
   cat <<EOF
@@ -108,23 +110,39 @@ scp -q -r "$repo_root/g1_root_state_bridge/g1_root_state_bridge" \
   "$robot_user@$robot_host:$remote_stage/"
 
 relay_pid=""
+producer_pid=""
 cleanup() {
-  if [[ -n "$relay_pid" ]]; then
-    kill "$relay_pid" 2>/dev/null || true
-    wait "$relay_pid" 2>/dev/null || true
-  fi
+  docker stop --time 3 "$container_name" >/dev/null 2>&1 || true
+  ssh -o BatchMode=yes -o ConnectTimeout=3 "$robot_user@$robot_host" \
+    "if test -s '$remote_pid_file'; then relay_pid=\$(cat '$remote_pid_file'); kill -TERM \"\$relay_pid\" 2>/dev/null || true; fi; pkill -TERM -f '[g]1_dynamic_capture_relay.*--target-port $lowstate_port' 2>/dev/null || true; rm -f '$remote_pid_file'" \
+    >/dev/null 2>&1 || true
+  for pid in "$producer_pid" "$relay_pid"; do
+    if [[ -n "$pid" ]]; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  for pid in "$producer_pid" "$relay_pid"; do
+    if [[ -n "$pid" ]]; then
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 ssh -o BatchMode=yes "$robot_user@$robot_host" \
-  "timeout --signal=TERM --kill-after=5s '${duration_sec}s' bash -lc '$relay_command'" &
+  "echo \$\$ > '$remote_pid_file'; exec timeout --signal=TERM --kill-after=5s '${duration_sec}s' bash -lc '$relay_command'" &
 relay_pid=$!
 sleep 2
 kill -0 "$relay_pid" 2>/dev/null || { echo "passive LowState relay exited during startup" >&2; wait "$relay_pid"; exit 5; }
 
 set +e
-timeout --signal=INT --kill-after=15s "${duration_sec}s" bash -lc "$local_command"
+timeout --signal=INT --kill-after=15s "${duration_sec}s" bash -lc "$local_command" &
+producer_pid=$!
+wait "$producer_pid"
 producer_status=$?
+producer_pid=""
 wait "$relay_pid"
 relay_status=$?
 set -e

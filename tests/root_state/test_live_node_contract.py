@@ -140,6 +140,17 @@ def test_passive_launcher_names_no_policy_or_command_channel() -> None:
     assert "command_capability=structurally_unavailable" in source
 
 
+def test_passive_launcher_cleanup_owns_both_producer_and_relay() -> None:
+    source = (ROOT / "scripts/run_g1_kiss_live_stack.sh").read_text()
+    assert 'producer_pid=$!' in source
+    assert 'for pid in "$producer_pid" "$relay_pid"' in source
+    assert 'docker stop --time 3 "$container_name"' in source
+    assert "--container-name $container_name" in source
+    assert "remote_pid_file" in source
+    assert "[g]1_dynamic_capture_relay.*--target-port $lowstate_port" in source
+    assert "trap 'exit 143' TERM" in source
+
+
 def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> None:
     source = (ROOT / "scripts/run_g1_kiss_live_verification.sh").read_text()
     assert "record_natnet_reference.py" in source
@@ -151,6 +162,12 @@ def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> N
     assert "G1_PELVIS_F_4123" in source
     assert "rigid_body_id=42" in source
     assert "actuation_publishers_created" in source
+    assert "wait_for_root_state.py" in source
+    assert "tcp://127.0.0.1:5575" in source
+    assert "READY FOR OPERATOR-CONTROLLED AMO" in source
+    assert source.index("wait_for_root_state.py") < source.index(
+        "record_natnet_reference.py"
+    )
     assert "rt/lowcmd" not in source
     assert "run_amo" not in source
 
