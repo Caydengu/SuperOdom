@@ -37,8 +37,11 @@ mkdir -p "$qualification_dir" "$run_dir/logs"
 
 export PYTHONPATH="$repo_root/g1_root_state_bridge"
 set -o pipefail
-"$python" -m pytest -q "$repo_root/tests/root_state" \
-  -k 'not g1_dynamic_capture_recorder and not g1_dynamic_capture_relay and not udp_receiver' \
+localization_image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.0-ui-init-humble}"
+docker run --rm --entrypoint /bin/bash \
+  --volume "$repo_root:/repo:ro" \
+  "$localization_image" -lc \
+  'source /opt/ros/humble/setup.bash; export PYTHONPATH=/repo/g1_root_state_bridge; export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1; cd /repo; python3 -m pytest -q tests/root_state -k "not g1_dynamic_capture_recorder and not g1_dynamic_capture_relay and not udp_receiver"' \
   2>&1 | tee "$run_dir/logs/qualification-tests.log"
 "$python" -m compileall -q "$repo_root/g1_root_state_bridge/g1_root_state_bridge"
 "$python" -m ruff check "$repo_root/g1_root_state_bridge" "$repo_root/tests/root_state" \
@@ -65,12 +68,21 @@ run_one() {
     --output "$qualification_dir/${short_name}-clock-replay.json" \
     2>&1 | tee "$run_dir/logs/qualification-${short_name}-clock-replay.log"
 
-  "$python" -m g1_root_state_bridge.replay_cli \
-    --scans "$scans" \
-    --lowstate "$capture/lowstate/packets.bin" \
-    --output-dir "$replay_dir" \
-    --gyro-bias-radps 0.025702817208593076 -0.02178237836035201 -0.01574406003550275 \
-    --treatment-name "$candidate_treatment" \
+  mkdir -p "$replay_dir"
+  docker run --rm --entrypoint /bin/bash \
+    --user "$(id -u):$(id -g)" \
+    --network none \
+    --cap-drop ALL \
+    --security-opt no-new-privileges \
+    --read-only \
+    --tmpfs /tmp:rw,nosuid,size=512m \
+    --env HOME=/tmp/home \
+    --volume "$repo_root:/repo:ro" \
+    --volume "$scans:/inputs/scans.npz:ro" \
+    --volume "$capture/lowstate/packets.bin:/inputs/packets.bin:ro" \
+    --volume "$replay_dir:/output:rw" \
+    "$localization_image" -lc \
+    'source /opt/ros/humble/setup.bash; export PYTHONPATH=/repo/g1_root_state_bridge; python3 -m g1_root_state_bridge.replay_cli --scans /inputs/scans.npz --lowstate /inputs/packets.bin --output-dir /output --gyro-bias-radps 0.025702817208593076 -0.02178237836035201 -0.01574406003550275 --treatment-name kiss_live_selected_pelvis_navigation' \
     2>&1 | tee "$run_dir/logs/qualification-${short_name}-replay.log"
 
   "$python" -m g1_root_state_bridge.compare_replay_cli \
@@ -78,6 +90,7 @@ run_one() {
     --candidate-treatment "$candidate_treatment" \
     --reference "$reference_treatments" \
     --reference-treatment "$reference_treatment" \
+    --pose-comparison initial-relative \
     --output "$qualification_dir/${short_name}-reference-comparison.json" \
     2>&1 | tee "$run_dir/logs/qualification-${short_name}-comparison.log"
 

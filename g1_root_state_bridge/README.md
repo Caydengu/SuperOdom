@@ -101,11 +101,11 @@ It has no robot command channel and does not launch locomotion:
 scripts/run_g1_structural_map_shadow.sh \
   --network-interface <offboard-G1-NIC> \
   --map <polycam-fieldbay-structural.npz> \
-  --map-sha256 8a4aa14ddf10e575459a528f1a213b895c025cefa1388e10e3c2c8f7811c5bb7 \
+  --map-sha256 <exact-structural-map-digest> \
   --duration-sec 300
 ```
 
-The selected map key is `map_xy_all_5cm`. Global initialization accumulates a
+The selected 2026-08-24 map key is `map_xy_structural_2cm`. Global initialization accumulates a
 10-second query; accepted tracking corrections are attempted every two seconds
 over a five-second window. `HSROOT02` remains the independent fast local lane
 on port 5575, while this slow lane publishes `RVMAP001` on port 5577. Motive is
@@ -122,7 +122,7 @@ scripts/run_g1_layered_localization_qualification.sh \
   --run-dir <new-run-directory> \
   --network-interface <offboard-G1-NIC> \
   --map <polycam-fieldbay-structural.npz> \
-  --map-sha256 8a4aa14ddf10e575459a528f1a213b895c025cefa1388e10e3c2c8f7811c5bb7 \
+  --map-sha256 <exact-structural-map-digest> \
   --robot-vlm-repo <robot-vlm-checkout>
 ```
 
@@ -132,3 +132,29 @@ digests, readiness packets, component logs, the robot-vlm report, and a final
 `validation.json`. It contains no policy launch or Unitree command publisher;
 Motive is unnecessary because this gate qualifies live transport and
 composition rather than localization accuracy.
+
+## Gio UI, Motive evaluator, and actual RealBackend gate
+
+`scripts/run_g1_kiss_live_verification.sh --integrated-robot-vlm` is the
+deployment-faithful successor to the transport-only qualification above. It
+verifies the exact GLB, deterministic mesh-surface target, structural NPZ,
+robot-vlm map artifact, and independent Motive-to-Polycam transform before any
+robot network access. It then starts the local lane, Gio's two-click Viser UI,
+the UI-initialized structural-map lane, passive raw recorders, and the actual
+`RealBackend` observation path in one bounded, command-incapable launch.
+
+The operator must keep G1-4123 stationary through startup gyro calibration and
+the UI initialization. A stationary capture must pass local runtime/freshness,
+map-lane identity/latency, robot-vlm availability/quality, and absolute Motive
+map-pose gates before any operator-controlled AMO run. Motive
+`G1_PELVIS_F_4123` / ID 42 remains evaluator-only. Its room transform is fit
+from at least four Motive-pointer/Polycam landmark pairs plus a held-out point;
+the evaluator refuses a transform from another map or pelvis asset.
+
+The Motive rigid body represents the front pelvis contour. The planar
+front-contour-to-URDF-pelvis offset is
+`-0.061431244015693665 m`, the exact maximum +X bound of Unitree's
+`pelvis_contour_link.STL` relative to the pelvis origin (mesh SHA-256
+`5cc5c2c7a312329e3feeb2b03d3fc09fc29705bd01864f6767e51be959662420`).
+It is applied along the calibrated robot-forward yaw; applying it along raw
+Motive asset +X is incorrect when the asset axes have a yaw offset.

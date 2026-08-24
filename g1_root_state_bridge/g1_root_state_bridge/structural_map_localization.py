@@ -612,6 +612,71 @@ class AutomaticMapCorrectionEngine:
             packet=packet,
         )
 
+    def initialize_from_ui(
+        self,
+        *,
+        map_T_local: np.ndarray,
+        fitness: float,
+        rmse_m: float,
+        min_eig: float,
+        cond_number: float,
+        reference_time_ns: int,
+        evidence_time_ns: int,
+        application_time_ns: int | None = None,
+    ) -> MapCorrectionAttempt:
+        """Initialize once from Gio's independently gated, pin-locked 3D ICP."""
+        start = time.perf_counter_ns()
+        transform = np.asarray(map_T_local, dtype=np.float64)
+        if transform.shape != (4, 4) or not np.all(np.isfinite(transform)):
+            raise StructuralMapLocalizationError("UI map transform must be finite 4x4")
+        if fitness < self.config.minimum_inlier_fraction:
+            raise StructuralMapLocalizationError("UI initialization fitness gate")
+        if rmse_m >= self.config.maximum_rmse_m:
+            raise StructuralMapLocalizationError("UI initialization RMSE gate")
+        if min_eig < self.config.minimum_observability_eigenvalue:
+            raise StructuralMapLocalizationError("UI initialization observability gate")
+        if cond_number > self.config.maximum_observability_condition_number:
+            raise StructuralMapLocalizationError("UI initialization condition-number gate")
+        yaw = math.atan2(float(transform[1, 0]), float(transform[0, 0]))
+        rotation = _rotation_row(yaw)
+        translation = np.asarray(transform[:2, 3], dtype=np.float64)
+        report = {
+            "source": "gio_ui_pin_locked_point_to_plane_icp",
+            "inlier_fraction": float(fitness),
+            "rmse_m": float(rmse_m),
+            "p95_m": float(rmse_m),
+            "observability": {
+                "minimum_eigenvalue": float(min_eig),
+                "condition_number": float(cond_number),
+                "observable": bool(
+                    min_eig >= self.config.minimum_observability_eigenvalue
+                    and cond_number <= self.config.maximum_observability_condition_number
+                ),
+            },
+        }
+        now_ns = time.time_ns() if application_time_ns is None else application_time_ns
+        packet = self._packet(
+            rotation=rotation,
+            translation_m=translation,
+            reference_time_ns=reference_time_ns,
+            evidence_time_ns=evidence_time_ns,
+            application_time_ns=now_ns,
+            icp=report,
+        )
+        self.rotation = rotation
+        self.translation_m = translation
+        runtime_ms = (time.perf_counter_ns() - start) * 1e-6
+        return MapCorrectionAttempt(
+            kind="ui_pin_locked_initialization",
+            accepted=True,
+            rejection_reason=None,
+            reference_time_ns=reference_time_ns,
+            evidence_time_ns=evidence_time_ns,
+            runtime_ms=runtime_ms,
+            report=report,
+            packet=packet,
+        )
+
     def track(
         self,
         query_xy: np.ndarray,

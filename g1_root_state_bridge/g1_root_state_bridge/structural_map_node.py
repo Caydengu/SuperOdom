@@ -38,6 +38,10 @@ from g1_root_state_bridge.structural_map_localization import (
     TimedLocalPose,
     TimedRegisteredCloud,
 )
+from g1_root_state_bridge.ui_initialization import (
+    UIInitializationError,
+    load_ui_map_initialization,
+)
 
 
 @dataclass(frozen=True)
@@ -142,7 +146,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--global-window-sec", type=float, default=10.0)
     parser.add_argument("--tracking-window-sec", type=float, default=5.0)
     parser.add_argument("--tracking-period-sec", type=float, default=2.0)
-    return parser.parse_args()
+    parser.add_argument(
+        "--initialization-mode", choices=("automatic", "ui"), default="automatic"
+    )
+    parser.add_argument("--ui-initialization-receipt", type=Path)
+    parser.add_argument("--expected-glb-sha256")
+    parser.add_argument("--expected-surface-sha256")
+    args = parser.parse_args()
+    if args.initialization_mode == "ui" and (
+        args.ui_initialization_receipt is None
+        or args.expected_glb_sha256 is None
+        or args.expected_surface_sha256 is None
+    ):
+        parser.error(
+            "ui initialization requires --ui-initialization-receipt, "
+            "--expected-glb-sha256, and --expected-surface-sha256"
+        )
+    return args
 
 
 def run_node(args: argparse.Namespace) -> None:
@@ -190,6 +210,8 @@ def run_node(args: argparse.Namespace) -> None:
             self.stats: Counter[str] = Counter()
             self.attempt_runtime_ms: deque[float] = deque(maxlen=2_000)
             self.last_attempt: dict[str, object] | None = None
+            self.last_ui_content_sha256: str | None = None
+            self.last_ui_file_signature: tuple[int, int] | None = None
             qos = QoSProfile(
                 history=HistoryPolicy.KEEP_LAST,
                 depth=4,
@@ -211,6 +233,8 @@ def run_node(args: argparse.Namespace) -> None:
                 daemon=True,
             )
             self.worker.start()
+            if args.initialization_mode == "ui":
+                self.create_timer(0.1, self._try_ui_initialization)
             self.create_timer(5.0, self._report)
 
         def _record_rejection(self, reason: str) -> None:
@@ -282,6 +306,88 @@ def run_node(args: argparse.Namespace) -> None:
                 "yaw_jump_deg": icp.get("yaw_jump_deg"),
             }
 
+        def _publish_attempt(self, attempt: MapCorrectionAttempt) -> None:
+            self.attempt_runtime_ms.append(attempt.runtime_ms)
+            self.last_attempt = self._attempt_summary(attempt)
+            self.get_logger().info(json.dumps(self.last_attempt, sort_keys=True))
+            if not attempt.accepted or attempt.packet is None:
+                self._record_rejection(attempt.rejection_reason or "map_gate")
+                return
+            try:
+                self.publisher.send(
+                    serialize_map_correction_v1(attempt.packet),
+                    flags=zmq.NOBLOCK,
+                )
+                self.stats["packets_published"] += 1
+            except zmq.Again:
+                self._record_rejection("publisher_backpressure")
+
+        def _try_ui_initialization(self) -> None:
+            receipt_path = args.ui_initialization_receipt
+            if receipt_path is None or self.engine.rotation is not None:
+                return
+            try:
+                stat = receipt_path.stat()
+            except FileNotFoundError:
+                return
+            signature = (int(stat.st_mtime_ns), int(stat.st_size))
+            if signature == self.last_ui_file_signature:
+                return
+            try:
+                receipt = load_ui_map_initialization(
+                    receipt_path,
+                    expected_structural_map_sha256=self.engine.map_digest.hex(),
+                    expected_glb_sha256=args.expected_glb_sha256,
+                    expected_surface_sha256=args.expected_surface_sha256,
+                    minimum_fitness=self.config.minimum_inlier_fraction,
+                    maximum_rmse_m=self.config.maximum_rmse_m,
+                    minimum_eigenvalue=self.config.minimum_observability_eigenvalue,
+                    maximum_condition_number=self.config.maximum_observability_condition_number,
+                    maximum_correction_m=0.75,
+                    maximum_correction_yaw_deg=20.0,
+                )
+            except (OSError, ValueError, UIInitializationError) as error:
+                self.last_ui_file_signature = signature
+                self._record_rejection(f"ui_receipt:{error}")
+                return
+            if receipt.content_sha256 == self.last_ui_content_sha256:
+                return
+            snapshot = self.root.snapshot()
+            now_ns = time.time_ns()
+            reason = root_evidence_rejection_reason(
+                snapshot,
+                evidence_time_ns=receipt.evidence_time_ns,
+                now_ns=now_ns,
+                config=self.config,
+            )
+            if reason is not None:
+                if reason in {"evidence_clock", "map_evidence_stale_before_registration"}:
+                    self.last_ui_file_signature = signature
+                self._record_rejection(f"ui_receipt:{reason}")
+                return
+            assert snapshot is not None
+            if self.bound_epoch is None or snapshot.packet.source_epoch != self.bound_epoch:
+                self._record_rejection("ui_receipt:local_epoch_unbound")
+                return
+            try:
+                attempt = self.engine.initialize_from_ui(
+                    map_T_local=receipt.map_T_local,
+                    fitness=receipt.fitness,
+                    rmse_m=receipt.rmse_m,
+                    min_eig=receipt.min_eig,
+                    cond_number=receipt.cond_number,
+                    reference_time_ns=receipt.reference_time_ns,
+                    evidence_time_ns=receipt.evidence_time_ns,
+                    application_time_ns=now_ns,
+                )
+            except StructuralMapLocalizationError as error:
+                self._record_rejection(f"ui_receipt:{error}")
+                return
+            self.last_ui_content_sha256 = receipt.content_sha256
+            self.last_ui_file_signature = signature
+            self.stats["ui_receipts_accepted"] += 1
+            self._publish_attempt(attempt)
+
         def _worker(self) -> None:
             while not self.stop_event.is_set():
                 try:
@@ -317,6 +423,8 @@ def run_node(args: argparse.Namespace) -> None:
                         self.last_attempt_evidence_ns = 0
                         self.stats["epoch_resets"] += 1
                         continue
+                    if args.initialization_mode == "ui" and self.engine.rotation is None:
+                        continue
                     if self.engine.rotation is None:
                         window_sec = self.config.global_window_sec
                     else:
@@ -351,20 +459,7 @@ def run_node(args: argparse.Namespace) -> None:
                         self._record_rejection(f"query:{error}")
                         continue
                     self.last_attempt_evidence_ns = evidence_ns
-                self.attempt_runtime_ms.append(attempt.runtime_ms)
-                self.last_attempt = self._attempt_summary(attempt)
-                self.get_logger().info(json.dumps(self.last_attempt, sort_keys=True))
-                if not attempt.accepted or attempt.packet is None:
-                    self._record_rejection(attempt.rejection_reason or "map_gate")
-                    continue
-                try:
-                    self.publisher.send(
-                        serialize_map_correction_v1(attempt.packet),
-                        flags=zmq.NOBLOCK,
-                    )
-                    self.stats["packets_published"] += 1
-                except zmq.Again:
-                    self._record_rejection("publisher_backpressure")
+                self._publish_attempt(attempt)
 
         def _report(self) -> None:
             runtimes = np.asarray(self.attempt_runtime_ms, dtype=np.float64)
@@ -385,6 +480,8 @@ def run_node(args: argparse.Namespace) -> None:
                         "command_capability": "structurally_unavailable",
                         "map_digest": self.engine.map_digest.hex(),
                         "map_key": self.engine.map_key,
+                        "initialization_mode": args.initialization_mode,
+                        "ui_receipt_content_sha256": self.last_ui_content_sha256,
                         "local_source_epoch": self.bound_epoch,
                         "initialized": self.engine.rotation is not None,
                         "stats": dict(self.stats),

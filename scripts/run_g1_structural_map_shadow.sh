@@ -20,6 +20,12 @@ Options:
   --ros-domain-id ID         default: 0
   --root-state-port PORT     HSROOT02 input; default: 5575
   --map-correction-port PORT RVMAP001 output; default: 5577
+  --initialization-mode MODE automatic|ui; default: automatic
+  --ui-initialization-receipt PATH
+                              atomically written Gio UI receipt; may not exist yet
+  --expected-glb-sha256 HEX   required with UI initialization
+  --expected-surface-sha256 HEX
+                              required deterministic GLB target digest
   --container-name NAME      optional stable Docker name
   --dry-run                  resolve and print the launch; no Docker I/O
 EOF
@@ -35,6 +41,10 @@ duration_sec=300
 ros_domain_id=0
 root_state_port=5575
 map_correction_port=5577
+initialization_mode=automatic
+ui_initialization_receipt=""
+expected_glb_sha256=""
+expected_surface_sha256=""
 container_name="g1-structural-map-${BASHPID}"
 dry_run=false
 
@@ -50,6 +60,10 @@ while (( $# )); do
     --ros-domain-id) ros_domain_id=$2; shift 2 ;;
     --root-state-port) root_state_port=$2; shift 2 ;;
     --map-correction-port) map_correction_port=$2; shift 2 ;;
+    --initialization-mode) initialization_mode=$2; shift 2 ;;
+    --ui-initialization-receipt) ui_initialization_receipt=$2; shift 2 ;;
+    --expected-glb-sha256) expected_glb_sha256=$2; shift 2 ;;
+    --expected-surface-sha256) expected_surface_sha256=$2; shift 2 ;;
     --container-name) container_name=$2; shift 2 ;;
     --dry-run) dry_run=true; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -70,6 +84,7 @@ for port in "$root_state_port" "$map_correction_port"; do
 done
 [[ "$root_state_port" != "$map_correction_port" ]] || { echo "root-state and map-correction ports must differ" >&2; exit 2; }
 [[ "$container_name" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid container name" >&2; exit 2; }
+[[ "$initialization_mode" == automatic || "$initialization_mode" == ui ]] || { echo "invalid initialization mode" >&2; exit 2; }
 
 map_path="$(realpath "$map_path")"
 observed_sha256="$(sha256sum "$map_path" | awk '{print $1}')"
@@ -81,6 +96,23 @@ observed_sha256="$(sha256sum "$map_path" | awk '{print $1}')"
 image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.4.0-humble}"
 cyclonedds_uri="<CycloneDDS><Domain id=\"any\"><General><Interfaces><NetworkInterface name=\"$network_interface\" /></Interfaces></General></Domain></CycloneDDS>"
 container_map=/opt/structural-map/fieldbay.npz
+ui_mount=()
+ui_node_args=(--initialization-mode "$initialization_mode")
+if [[ "$initialization_mode" == ui ]]; then
+  [[ -n "$ui_initialization_receipt" ]] || { echo "UI initialization receipt path is required" >&2; exit 2; }
+  [[ "$expected_glb_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "expected GLB SHA-256 is invalid" >&2; exit 2; }
+  [[ "$expected_surface_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "expected surface SHA-256 is invalid" >&2; exit 2; }
+  receipt_parent="$(realpath -m "$(dirname "$ui_initialization_receipt")")"
+  receipt_name="$(basename "$ui_initialization_receipt")"
+  [[ -d "$receipt_parent" ]] || { echo "UI receipt directory does not exist: $receipt_parent" >&2; exit 2; }
+  [[ "$receipt_name" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid UI receipt filename" >&2; exit 2; }
+  ui_mount=(--volume "$receipt_parent:/opt/ui-initialization:ro")
+  ui_node_args+=(
+    --ui-initialization-receipt "/opt/ui-initialization/$receipt_name"
+    --expected-glb-sha256 "${expected_glb_sha256,,}"
+    --expected-surface-sha256 "${expected_surface_sha256,,}"
+  )
+fi
 
 if [[ "$dry_run" == false ]]; then
   for command in docker timeout; do
@@ -91,15 +123,18 @@ fi
 
 docker_command=(
   docker run --rm --name "$container_name"
+  --user "$(id -u):$(id -g)"
   --network host
   --cap-drop ALL
   --security-opt no-new-privileges
   --read-only
   --tmpfs /tmp:rw,noexec,nosuid,size=256m
   --volume "$map_path:$container_map:ro"
+  "${ui_mount[@]}"
   --env "ROS_DOMAIN_ID=$ros_domain_id"
   --env RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
   --env "CYCLONEDDS_URI=$cyclonedds_uri"
+  --env HOME=/tmp/home
   "$image"
   g1-structural-map-localization
   --map "$container_map"
@@ -108,6 +143,7 @@ docker_command=(
   --map-epoch "$map_epoch"
   --root-endpoint "tcp://127.0.0.1:$root_state_port"
   --map-bind "tcp://*:$map_correction_port"
+  "${ui_node_args[@]}"
 )
 
 if [[ "$dry_run" == true ]]; then
@@ -117,6 +153,10 @@ image=$image
 map=$map_path
 map_sha256=$observed_sha256
 map_key=$map_key
+initialization_mode=$initialization_mode
+ui_initialization_receipt=$ui_initialization_receipt
+expected_glb_sha256=$expected_glb_sha256
+expected_surface_sha256=$expected_surface_sha256
 duration_sec=$duration_sec
 root_state_endpoint=tcp://127.0.0.1:$root_state_port
 map_correction_endpoint=tcp://127.0.0.1:$map_correction_port

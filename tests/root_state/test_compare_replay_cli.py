@@ -2,6 +2,8 @@ import argparse
 import json
 from pathlib import Path
 
+import pytest
+
 from g1_root_state_bridge.compare_replay_cli import compare
 
 
@@ -37,8 +39,31 @@ def test_exact_timestamp_comparison_passes_bounded_drift(tmp_path: Path) -> None
             minimum_reference_coverage=0.995,
             maximum_planar_rmse_m=0.01,
             maximum_yaw_rmse_deg=0.5,
+            pose_comparison="raw",
         )
     )
     assert report["status"] == "pass"
     assert report["planar_rmse_m"] < 0.002
     assert report["source_joint_sequence_match_fraction"] == 1.0
+
+
+def test_initial_relative_comparison_removes_only_local_origin_offset(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate.jsonl"
+    reference = tmp_path / "reference.jsonl"
+    _write(candidate, "candidate", 0.1)
+    _write(reference, "reference", 0.0)
+    report = compare(
+        argparse.Namespace(
+            candidate=candidate,
+            candidate_treatment="candidate",
+            reference=reference,
+            reference_treatment="reference",
+            minimum_reference_coverage=0.995,
+            maximum_planar_rmse_m=0.01,
+            maximum_yaw_rmse_deg=0.5,
+            pose_comparison="initial-relative",
+        )
+    )
+    assert report["status"] == "pass"
+    assert report["raw_planar_rmse_m"] == pytest.approx(0.1)
+    assert report["planar_rmse_m"] == pytest.approx(0.0)

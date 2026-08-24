@@ -36,10 +36,10 @@ def bag_counts(metadata_path: Path) -> dict[str, int]:
     return counts
 
 
-def last_live_status(log_path: Path) -> dict[str, Any]:
+def last_schema_status(log_path: Path, schema: str) -> dict[str, Any]:
     selected: dict[str, Any] | None = None
     for line in log_path.read_text(encoding="utf-8").splitlines():
-        if '"schema": "g1_kiss_live_localization_status_v1"' not in line:
+        if f'"schema": "{schema}"' not in line:
             continue
         start = line.find("{")
         if start < 0:
@@ -48,8 +48,12 @@ def last_live_status(log_path: Path) -> dict[str, Any]:
         if isinstance(candidate, dict):
             selected = candidate
     if selected is None:
-        raise ValueError("live producer log contains no status event")
+        raise ValueError(f"log contains no {schema} status event")
     return selected
+
+
+def last_live_status(log_path: Path) -> dict[str, Any]:
+    return last_schema_status(log_path, "g1_kiss_live_localization_status_v1")
 
 
 def validate(run_dir: Path) -> dict[str, Any]:
@@ -94,6 +98,13 @@ def validate(run_dir: Path) -> dict[str, Any]:
         and int(live.get("lowstate_udp_invalid", 1)) == 0
         and live.get("command_capability") == "structurally_unavailable"
     )
+    total_runtime = live.get("stage_runtime_ms", {}).get("total", {})
+    pose_age = live.get("pose_age_ms", {})
+    timing_ok = (
+        float(total_runtime.get("p95", float("inf"))) <= 20.0
+        and float(total_runtime.get("p99", float("inf"))) <= 30.0
+        and float(pose_age.get("p95", float("inf"))) <= 50.0
+    )
     checks = {
         "processes": {"ok": process_ok, "statuses": process_status},
         "motive": {"ok": motive_ok, **motive},
@@ -104,7 +115,64 @@ def validate(run_dir: Path) -> dict[str, Any]:
             "availability": availability,
             "last_status": live,
         },
+        "live_timing": {
+            "ok": timing_ok,
+            "total_runtime_ms": total_runtime,
+            "pose_age_ms": pose_age,
+            "gates": {
+                "maximum_total_runtime_p95_ms": 20.0,
+                "maximum_total_runtime_p99_ms": 30.0,
+                "maximum_pose_age_p95_ms": 50.0,
+            },
+        },
     }
+    if bool(manifest.get("integrated_robot_vlm")):
+        map_readiness = load_json(run_dir / "runtime" / "map-readiness.json")
+        map_status = last_schema_status(
+            run_dir / "logs" / "map_stack.log",
+            "g1_structural_map_localization_status_v1",
+        )
+        robot_vlm = load_json(run_dir / "robot-vlm-real-backend.json")
+        expected_map_sha256 = str(manifest["structural_map_sha256"])
+        expected_artifact_sha256 = str(manifest["map_artifact_sha256"])
+        map_runtime = map_status.get("attempt_runtime_ms", {})
+        map_ready_ok = (
+            map_readiness.get("status") == "ready"
+            and map_readiness.get("map_digest") == expected_map_sha256
+            and int(map_readiness.get("local_source_epoch", -1))
+            == int(manifest.get("localization_source_epoch", -2))
+            and map_readiness.get("command_capability") == "structurally_unavailable"
+        )
+        map_lane_ok = (
+            bool(map_status.get("initialized"))
+            and map_status.get("map_digest") == expected_map_sha256
+            and map_status.get("initialization_mode") == "ui"
+            and bool(map_status.get("ui_receipt_content_sha256"))
+            and int(map_status.get("invalid_root_packets", 1)) == 0
+            and int(map_status.get("stats", {}).get("ui_receipts_accepted", 0)) == 1
+            and int(map_status.get("stats", {}).get("packets_published", 0)) >= 1
+            and float(map_runtime.get("p95", float("inf"))) <= 150.0
+            and map_status.get("command_capability") == "structurally_unavailable"
+        )
+        robot_vlm_ok = (
+            robot_vlm.get("status") == "pass"
+            and robot_vlm.get("command_capability") == "structurally_unavailable"
+            and robot_vlm.get("map", {}).get("artifact_sha256") == expected_artifact_sha256
+            and float(robot_vlm.get("base_pose_availability", 0.0)) >= 0.98
+            and int(robot_vlm.get("transport", {}).get("local_rejections", 1)) == 0
+            and int(robot_vlm.get("transport", {}).get("map_rejections", 1)) == 0
+        )
+        checks.update(
+            {
+                "map_readiness": {"ok": map_ready_ok, **map_readiness},
+                "structural_map_lane": {
+                    "ok": map_lane_ok,
+                    "last_status": map_status,
+                    "maximum_attempt_runtime_p95_ms": 150.0,
+                },
+                "robot_vlm_real_backend": {"ok": robot_vlm_ok, **robot_vlm},
+            }
+        )
     passed = all(bool(check["ok"]) for check in checks.values())
     return {
         "schema": "g1_kiss_live_verification_validation_v1",
@@ -112,7 +180,11 @@ def validate(run_dir: Path) -> dict[str, Any]:
         "run_dir": str(run_dir.resolve()),
         "checks": checks,
         "evidence_class": (
-            "passive stationary live-localization capture"
+            {
+                "stationary": "passive stationary live-localization capture",
+                "amo-walk": "operator-controlled AMO live-localization capture",
+                "amo-stress": "operator-controlled AMO stress live-localization capture",
+            }.get(str(manifest.get("capture_class", "stationary")), "live-localization capture")
             if passed
             else "incomplete passive capture"
         ),
