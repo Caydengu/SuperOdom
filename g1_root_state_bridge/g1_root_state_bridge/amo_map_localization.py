@@ -61,22 +61,30 @@ def vertical_persistence_xy(
     points = points[finite]
     xy_cell = np.rint(points[:, :2] / xy_resolution_m).astype(np.int64)
     z_cell = np.rint(points[:, 2] / height_resolution_m).astype(np.int64)
-    unique_xy, inverse = np.unique(xy_cell, axis=0, return_inverse=True)
-    z_min = np.full(unique_xy.shape[0], np.inf)
-    z_max = np.full(unique_xy.shape[0], -np.inf)
+    xy_minimum = np.min(xy_cell, axis=0)
+    xy_shifted = xy_cell - xy_minimum
+    y_stride = int(np.max(xy_shifted[:, 1])) + 1
+    xy_key = xy_shifted[:, 0] * y_stride + xy_shifted[:, 1]
+    unique_xy_key, inverse = np.unique(xy_key, return_inverse=True)
+    group_count = unique_xy_key.size
+    z_min = np.full(group_count, np.inf)
+    z_max = np.full(group_count, -np.inf)
     np.minimum.at(z_min, inverse, points[:, 2])
     np.maximum.at(z_max, inverse, points[:, 2])
-    unique_xy_z = np.unique(np.column_stack((inverse, z_cell)), axis=0)
+    z_offset = int(np.min(z_cell))
+    z_stride = int(np.max(z_cell)) - z_offset + 1
+    unique_xy_z = np.unique(inverse.astype(np.int64) * z_stride + z_cell - z_offset)
     height_bin_count = np.bincount(
-        unique_xy_z[:, 0], minlength=unique_xy.shape[0]
+        unique_xy_z // z_stride,
+        minlength=group_count,
     )
     admitted = ((z_max - z_min) >= minimum_vertical_span_m) & (
         height_bin_count >= minimum_height_bins
     )
     if not np.any(admitted):
         raise ValueError("no XY columns pass the vertical-persistence gate")
-    xy_sum = np.zeros((unique_xy.shape[0], 2), dtype=np.float64)
-    xy_count = np.bincount(inverse, minlength=unique_xy.shape[0])
+    xy_sum = np.zeros((group_count, 2), dtype=np.float64)
+    xy_count = np.bincount(inverse, minlength=group_count)
     np.add.at(xy_sum, inverse, points[:, :2])
     xy_mean = xy_sum / xy_count[:, None]
     return xy_mean[admitted]
@@ -172,9 +180,15 @@ def pelvis_structural_cloud(
         raise ValueError("no scans overlap the pelvis structural-cloud window")
 
     def nearest(reference: np.ndarray, query: np.ndarray) -> np.ndarray:
-        right = np.clip(np.searchsorted(reference, query, side="left"), 0, reference.size - 1)
+        right = np.clip(
+            np.searchsorted(reference, query, side="left"), 0, reference.size - 1
+        )
         left = np.clip(right - 1, 0, reference.size - 1)
-        return np.where(np.abs(query - reference[left]) <= np.abs(reference[right] - query), left, right)
+        return np.where(
+            np.abs(query - reference[left]) <= np.abs(reference[right] - query),
+            left,
+            right,
+        )
 
     scan_time = archive.source_time_ns[scan_indices]
     pose_index = nearest(pose_time, scan_time)
@@ -214,7 +228,9 @@ def pelvis_structural_cloud(
         "requested_scan_count": int(scan_indices.size),
         "admitted_scan_count": int(np.sum(admitted)),
         "pose_match_age_ms_p95": float(np.quantile(pose_age_ns[admitted], 0.95) * 1e-6),
-        "lowstate_match_age_ms_p95": float(np.quantile(lowstate_age_ns[admitted], 0.95) * 1e-6),
+        "lowstate_match_age_ms_p95": float(
+            np.quantile(lowstate_age_ns[admitted], 0.95) * 1e-6
+        ),
         "point_count": int(cloud.shape[0]),
         "scan_stride": scan_stride,
         "voxel_resolution_m": voxel_resolution_m,
@@ -237,8 +253,12 @@ def _occupancy(
 ) -> tuple[np.ndarray, np.ndarray]:
     cells = np.rint(points / resolution_m).astype(np.int64)
     minimum = np.min(cells, axis=0)
-    cells = np.unique(cells - minimum, axis=0)
+    cells = cells - minimum
     grid = np.zeros(tuple(np.max(cells, axis=0) + 1), dtype=np.float32)
+    # Repeated advanced-index assignments are idempotent.  Sorting every point
+    # through ``np.unique`` produced the same binary occupancy but dominated
+    # global-localization latency (187 sorts per initialization on the frozen
+    # yaw grid).
     grid[cells[:, 0], cells[:, 1]] = 1.0
     return grid, minimum.astype(np.float64) * resolution_m
 
@@ -368,9 +388,7 @@ def refine_icp(
     distance, index = tree.query(transformed, workers=-1)
     admitted = distance <= maximum_correspondence_m
     residual = distance[admitted]
-    observability = directional_observability(
-        map_xy, transformed, index, admitted
-    )
+    observability = directional_observability(map_xy, transformed, index, admitted)
     return {
         "rotation": total_rotation,
         "translation_m": total_translation,

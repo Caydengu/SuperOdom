@@ -4,11 +4,19 @@ import math
 
 import numpy as np
 from g1_root_state_bridge.amo_map_localization import (
+    _occupancy,
     correlate_at_yaw,
     directional_observability,
     refine_icp,
     vertical_persistence_xy,
 )
+
+
+def test_occupancy_is_binary_when_input_cells_repeat() -> None:
+    points = np.asarray(((1.0, 2.0), (1.0, 2.0), (1.1, 2.0)))
+    grid, minimum = _occupancy(points, 0.1)
+    assert float(np.sum(grid)) == 2.0
+    np.testing.assert_allclose(minimum, (1.0, 2.0))
 
 
 def test_correlation_and_icp_recover_known_planar_transform() -> None:
@@ -47,7 +55,11 @@ def test_directional_observability_rejects_single_wall_tangent_ambiguity() -> No
 
 def test_vertical_persistence_rejects_floor_and_keeps_wall_columns() -> None:
     floor = np.asarray(
-        [(x, y, 0.0) for x in np.arange(0.0, 1.0, 0.1) for y in np.arange(0.0, 1.0, 0.1)]
+        [
+            (x, y, 0.0)
+            for x in np.arange(0.0, 1.0, 0.1)
+            for y in np.arange(0.0, 1.0, 0.1)
+        ]
     )
     wall = np.asarray(
         [(2.0, y, z) for y in (0.0, 0.1) for z in np.arange(-0.5, 0.6, 0.1)]
@@ -55,3 +67,23 @@ def test_vertical_persistence_rejects_floor_and_keeps_wall_columns() -> None:
     result = vertical_persistence_xy(np.concatenate((floor, wall)), xy_resolution_m=0.1)
     assert result.shape[0] == 2
     np.testing.assert_allclose(result[:, 0], 2.0)
+
+
+def test_vertical_persistence_matches_two_axis_unique_reference() -> None:
+    rng = np.random.default_rng(19)
+    points = rng.uniform((-2.0, -3.0, -1.0), (2.0, 3.0, 1.0), size=(20_000, 3))
+    xy_cell = np.rint(points[:, :2] / 0.1).astype(np.int64)
+    z_cell = np.rint(points[:, 2] / 0.1).astype(np.int64)
+    unique_xy, inverse = np.unique(xy_cell, axis=0, return_inverse=True)
+    z_min = np.full(unique_xy.shape[0], np.inf)
+    z_max = np.full(unique_xy.shape[0], -np.inf)
+    np.minimum.at(z_min, inverse, points[:, 2])
+    np.maximum.at(z_max, inverse, points[:, 2])
+    unique_xy_z = np.unique(np.column_stack((inverse, z_cell)), axis=0)
+    height_bins = np.bincount(unique_xy_z[:, 0], minlength=unique_xy.shape[0])
+    admitted = ((z_max - z_min) >= 0.4) & (height_bins >= 4)
+    xy_sum = np.zeros((unique_xy.shape[0], 2), dtype=np.float64)
+    np.add.at(xy_sum, inverse, points[:, :2])
+    expected = xy_sum / np.bincount(inverse)[:, None]
+    result = vertical_persistence_xy(points)
+    np.testing.assert_allclose(result, expected[admitted])
