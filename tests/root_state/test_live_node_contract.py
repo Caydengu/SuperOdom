@@ -146,6 +146,7 @@ def test_passive_launcher_cleanup_owns_both_producer_and_relay() -> None:
     assert 'for pid in "$producer_pid" "$relay_pid"' in source
     assert 'docker stop --time 3 "$container_name"' in source
     assert "--container-name $container_name" in source
+    assert "--root-state-port $root_state_port" in source
     assert "remote_pid_file" in source
     assert "[g]1_dynamic_capture_relay.*--target-port $lowstate_port" in source
     assert "trap 'exit 143' TERM" in source
@@ -164,6 +165,7 @@ def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> N
     assert "actuation_publishers_created" in source
     assert "wait_for_root_state.py" in source
     assert "tcp://127.0.0.1:5575" in source
+    assert '--endpoint "tcp://127.0.0.1:$root_state_port"' in source
     assert "READY FOR OPERATOR-CONTROLLED AMO" in source
     assert source.index("wait_for_root_state.py") < source.index(
         "record_natnet_reference.py"

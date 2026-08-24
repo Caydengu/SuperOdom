@@ -20,6 +20,7 @@ Options:
   --robot-python PATH             default: egonav-deploy Python on G1
   --ros-domain-id ID              default: 0
   --lowstate-port PORT            default: 5589
+  --root-state-port PORT          default: 5575
   --dry-run                       print resolved commands; no network or Docker I/O
 EOF
 }
@@ -33,6 +34,7 @@ robot_dds_interface=eth0
 robot_python=/home/unitree/miniforge3/envs/egonav-deploy/bin/python
 ros_domain_id=0
 lowstate_port=5589
+root_state_port=5575
 dry_run=false
 
 while (( $# )); do
@@ -46,6 +48,7 @@ while (( $# )); do
     --robot-python) robot_python=$2; shift 2 ;;
     --ros-domain-id) ros_domain_id=$2; shift 2 ;;
     --lowstate-port) lowstate_port=$2; shift 2 ;;
+    --root-state-port) root_state_port=$2; shift 2 ;;
     --dry-run) dry_run=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage; exit 2 ;;
@@ -63,6 +66,8 @@ done
 }
 [[ "$ros_domain_id" =~ ^[0-9]+$ ]] && (( 10#$ros_domain_id <= 232 )) || { echo "invalid ROS domain" >&2; exit 2; }
 [[ "$lowstate_port" =~ ^[0-9]+$ ]] && (( 10#$lowstate_port > 0 && 10#$lowstate_port <= 65535 )) || { echo "invalid port" >&2; exit 2; }
+[[ "$root_state_port" =~ ^[0-9]+$ ]] && (( 10#$root_state_port > 0 && 10#$root_state_port <= 65535 )) || { echo "invalid root-state port" >&2; exit 2; }
+[[ "$root_state_port" != "$lowstate_port" ]] || { echo "root-state and LowState ports must differ" >&2; exit 2; }
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
@@ -87,7 +92,7 @@ else
 fi
 
 relay_command="PYTHONPATH=$remote_stage $robot_python -m g1_root_state_bridge.g1_dynamic_capture_relay --target-host $offboard_robot_address --target-port $lowstate_port --network-interface $robot_dds_interface --domain-id 0 --duration-sec $duration_sec"
-local_command="$repo_root/docker/kiss-live/run_live.sh --network-interface $network_interface --ros-domain-id $ros_domain_id --lowstate-port $lowstate_port --container-name $container_name"
+local_command="$repo_root/docker/kiss-live/run_live.sh --network-interface $network_interface --ros-domain-id $ros_domain_id --lowstate-port $lowstate_port --root-state-port $root_state_port --container-name $container_name"
 
 if [[ "$dry_run" == true ]]; then
   cat <<EOF
@@ -100,6 +105,7 @@ stage_target=$remote_stage/g1_root_state_bridge
 remote_relay=$relay_command
 local_producer=$local_command
 command_capability=structurally_unavailable
+root_state_endpoint=tcp://127.0.0.1:$root_state_port
 EOF
   exit 0
 fi

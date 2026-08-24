@@ -18,6 +18,7 @@ Options:
   --rigid-body-id ID           default: 42
   --rigid-body-name NAME       default: G1_PELVIS_F_4123
   --ros-domain-id ID           default: 0
+  --root-state-port PORT       default: 5575 (tcp://127.0.0.1:5575)
   --dry-run
 EOF
 }
@@ -35,6 +36,7 @@ motive_server=172.24.68.77
 rigid_body_id=42
 rigid_body_name=G1_PELVIS_F_4123
 ros_domain_id=0
+root_state_port=5575
 live_lowstate_port=5589
 record_lowstate_port=5590
 dry_run=false
@@ -51,6 +53,7 @@ while (( $# )); do
     --rigid-body-id) rigid_body_id=$2; shift 2 ;;
     --rigid-body-name) rigid_body_name=$2; shift 2 ;;
     --ros-domain-id) ros_domain_id=$2; shift 2 ;;
+    --root-state-port) root_state_port=$2; shift 2 ;;
     --dry-run) dry_run=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage; exit 2 ;;
@@ -63,6 +66,14 @@ done
   exit 2
 }
 [[ "$rigid_body_id" =~ ^[0-9]+$ ]] || { echo "invalid rigid-body ID" >&2; exit 2; }
+[[ "$root_state_port" =~ ^[0-9]+$ ]] && (( 10#$root_state_port > 0 && 10#$root_state_port <= 65535 )) || {
+  echo "invalid root-state port" >&2
+  exit 2
+}
+[[ "$root_state_port" != "$live_lowstate_port" && "$root_state_port" != "$record_lowstate_port" ]] || {
+  echo "root-state and LowState ports must differ" >&2
+  exit 2
+}
 for value in "$network_interface" "$robot_dds_interface" "$robot_user" "$rigid_body_name"; do
   [[ "$value" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "unsafe identifier: $value" >&2; exit 2; }
 done
@@ -93,6 +104,7 @@ rigid_body=$rigid_body_name id=$rigid_body_id
 image=$image
 topics=/utlidar/cloud_livox_mid360,/utlidar/imu_livox_mid360,/g1/localization/pelvis_odom,/g1/localization/cloud_registered
 capture_readiness=first fresh and fully healthy HSROOT02 packet; robot must remain stationary until READY is printed
+root_state_endpoint=tcp://127.0.0.1:$root_state_port
 command_capability=structurally_unavailable
 EOF
   exit 0
@@ -166,6 +178,7 @@ live_duration=$((10#$duration_sec + 15))
   --robot-dds-interface "$robot_dds_interface" \
   --ros-domain-id "$ros_domain_id" \
   --lowstate-port "$live_lowstate_port" \
+  --root-state-port "$root_state_port" \
   >"$run_dir/logs/live_stack.log" 2>&1 &
 live_pid=$!
 
@@ -190,7 +203,7 @@ trap cleanup EXIT INT TERM
 # Livox stream during capture startup.
 if ! PYTHONPATH="$repo_root/g1_root_state_bridge" python3 \
   "$script_dir/wait_for_root_state.py" \
-  --endpoint tcp://127.0.0.1:5575 \
+  --endpoint "tcp://127.0.0.1:$root_state_port" \
   --timeout-sec 12 \
   --output "$run_dir/runtime/readiness-root-state.json" \
   >"$run_dir/logs/readiness.log" 2>&1; then
