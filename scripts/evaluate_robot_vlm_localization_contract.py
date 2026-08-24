@@ -346,7 +346,12 @@ def main() -> None:
         parser.add_argument(f"--{run}-corrections", type=Path, required=True)
         parser.add_argument(f"--{run}-motive", type=Path, required=True)
         parser.add_argument(f"--{run}-fit-start-ns", type=int, required=True)
-    parser.add_argument("--treatment", required=True)
+    parser.add_argument(
+        "--treatment",
+        help="Shared treatment name; overridden by per-run treatment arguments.",
+    )
+    parser.add_argument("--walk02-treatment")
+    parser.add_argument("--walk03-treatment")
     parser.add_argument("--fit-duration-sec", type=float, default=10.0)
     parser.add_argument(
         "--position-policy",
@@ -364,10 +369,17 @@ def main() -> None:
     from rv.backends.sim_real import localization as localization_module
 
     runs: dict[str, dict[str, object]] = {}
+    treatment_names: dict[str, str] = {}
     for name in ("walk02", "walk03"):
+        treatment_name = getattr(args, f"{name}_treatment") or args.treatment
+        if treatment_name is None:
+            raise ValueError(
+                f"{name} requires --treatment or --{name}-treatment"
+            )
+        treatment_names[name] = treatment_name
         run = _run_contract(
             records=_load_records(
-                getattr(args, f"{name}_treatments"), args.treatment
+                getattr(args, f"{name}_treatments"), treatment_name
             ),
             correction_report=getattr(args, f"{name}_corrections"),
             localization_module=localization_module,
@@ -387,7 +399,7 @@ def main() -> None:
         "schema": "g1_robot_vlm_localization_contract_score_v1",
         "motive_role": "evaluator_only_cross_run_transform",
         "motive_online_input": False,
-        "local_treatment": args.treatment,
+        "local_treatments": treatment_names,
         "map_composition": args.position_policy,
         "quality_threshold": 0.5,
         "severe_error_thresholds": {"position_m": 0.25, "yaw_deg": 10.0},
