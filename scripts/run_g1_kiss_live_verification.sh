@@ -80,7 +80,7 @@ done
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
-image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.3.0-humble}"
+image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.4.0-humble}"
 route_to_robot="$(ip route get "$robot_host" | head -1)"
 [[ "$route_to_robot" != *" via "* ]] || { echo "robot route is not direct: $route_to_robot" >&2; exit 4; }
 [[ "$route_to_robot" == *" dev $network_interface "* ]] || { echo "wrong robot NIC: $route_to_robot" >&2; exit 4; }

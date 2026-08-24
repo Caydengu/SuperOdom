@@ -88,3 +88,25 @@ It stages only `g1_dynamic_capture_relay` into the G1's existing
 forwards CRC-protected joint samples. The KISS producer remains in the pinned
 offboard ROS image. The launcher is bounded by `--duration-sec`, contains no
 policy command, and is not to be executed until the Goal 2 passive-shadow gate.
+
+## Structural-map correction shadow
+
+Run the slow map lane in a second terminal only after the local producer is
+healthy. The launcher verifies the exact processed Polycam-map digest, mounts
+the map read-only, consumes the registered cloud and pelvis odometry in the
+shared `kiss_local` frame, and publishes fixed 176-byte `RVMAP001` corrections.
+It has no robot command channel and does not launch locomotion:
+
+```bash
+scripts/run_g1_structural_map_shadow.sh \
+  --network-interface <offboard-G1-NIC> \
+  --map <polycam-fieldbay-structural.npz> \
+  --map-sha256 8a4aa14ddf10e575459a528f1a213b895c025cefa1388e10e3c2c8f7811c5bb7 \
+  --duration-sec 300
+```
+
+The selected map key is `map_xy_all_5cm`. Global initialization accumulates a
+10-second query; accepted tracking corrections are attempted every two seconds
+over a five-second window. `HSROOT02` remains the independent fast local lane
+on port 5575, while this slow lane publishes `RVMAP001` on port 5577. Motive is
+never an online input.

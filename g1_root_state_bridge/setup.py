@@ -1,6 +1,5 @@
 from setuptools import find_packages, setup
 
-
 package_name = "g1_root_state_bridge"
 
 setup(
@@ -25,20 +24,14 @@ setup(
     license="BSD-3-Clause",
     entry_points={
         "console_scripts": [
-            "g1-dynamic-capture-relay = "
-            "g1_root_state_bridge.g1_dynamic_capture_relay:main",
-            "g1-dynamic-capture-recorder = "
-            "g1_root_state_bridge.g1_dynamic_capture_recorder:main",
-            "g1-kiss-localization-replay = "
-            "g1_root_state_bridge.replay_cli:main",
-            "g1-kiss-live-localization = "
-            "g1_root_state_bridge.live_node:main",
-            "g1-kiss-compare-replay = "
-            "g1_root_state_bridge.compare_replay_cli:main",
-            "g1-kiss-fault-matrix = "
-            "g1_root_state_bridge.fault_matrix_cli:main",
-            "g1-kiss-clock-replay = "
-            "g1_root_state_bridge.clock_replay_cli:main",
+            "g1-dynamic-capture-relay = g1_root_state_bridge.g1_dynamic_capture_relay:main",
+            "g1-dynamic-capture-recorder = g1_root_state_bridge.g1_dynamic_capture_recorder:main",
+            "g1-kiss-localization-replay = g1_root_state_bridge.replay_cli:main",
+            "g1-kiss-live-localization = g1_root_state_bridge.live_node:main",
+            "g1-structural-map-localization = g1_root_state_bridge.structural_map_node:main",
+            "g1-kiss-compare-replay = g1_root_state_bridge.compare_replay_cli:main",
+            "g1-kiss-fault-matrix = g1_root_state_bridge.fault_matrix_cli:main",
+            "g1-kiss-clock-replay = g1_root_state_bridge.clock_replay_cli:main",
         ],
     },
 )

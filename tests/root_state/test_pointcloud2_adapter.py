@@ -1,13 +1,26 @@
-from dataclasses import dataclass
 import struct
+from dataclasses import dataclass
+from typing import ClassVar
 
 import numpy as np
 import pytest
-
 from g1_root_state_bridge.pointcloud2_adapter import (
     PointCloud2ContractError,
     decode_livox_pointcloud2,
+    decode_xyz_pointcloud2,
 )
+
+
+def test_decode_xyz_pointcloud2_accepts_registered_cloud_without_time() -> None:
+    message = Message()
+    message.data = b"".join(
+        struct.pack("<4f", *row) for row in ((1.0, 2.0, 3.0, 0.0), (4.0, 5.0, 6.0, 0.0))
+    )
+    message.width = 2
+    message.row_step = 32
+    message.fields = message.fields[:3]
+    decoded = decode_xyz_pointcloud2(message)
+    np.testing.assert_allclose(decoded, ((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)))
 
 
 @dataclass
@@ -24,7 +37,12 @@ class Message:
     point_step = 16
     row_step = 48
     is_bigendian = False
-    fields = [Field("x", 0), Field("y", 4), Field("z", 8), Field("time", 12)]
+    fields: ClassVar[list[Field]] = [
+        Field("x", 0),
+        Field("y", 4),
+        Field("z", 8),
+        Field("time", 12),
+    ]
     data = b"".join(
         struct.pack("<4f", *row)
         for row in (
@@ -44,8 +62,7 @@ def test_deployed_pointcloud_layout_preserves_time_and_range_filters() -> None:
 def test_normalized_replay_seconds_are_an_explicit_compatibility_mode() -> None:
     message = Message()
     message.data = b"".join(
-        struct.pack("<4f", *row)
-        for row in ((1.0, 0.0, 0.0, 0.0), (2.0, 0.0, 0.0, 0.1))
+        struct.pack("<4f", *row) for row in ((1.0, 0.0, 0.0, 0.0), (2.0, 0.0, 0.0, 0.1))
     )
     message.width = 2
     message.row_step = 32

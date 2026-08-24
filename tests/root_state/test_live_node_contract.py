@@ -52,7 +52,9 @@ def test_startup_gyro_bias_rejects_a_moving_leg_window() -> None:
 
 
 def test_live_node_uses_deployed_topics_and_has_no_unitree_command_surface() -> None:
-    source = (ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py").read_text()
+    source = (
+        ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py"
+    ).read_text()
     assert "/utlidar/cloud_livox_mid360" in source
     assert "/utlidar/imu_livox_mid360" in source
     assert "/g1/localization/cloud_registered" in source
@@ -84,7 +86,9 @@ def test_container_entrypoint_sources_ros_with_nounset_disabled() -> None:
 
 
 def test_live_node_discards_cross_epoch_scans_and_survives_zmq_backpressure() -> None:
-    source = (ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py").read_text()
+    source = (
+        ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py"
+    ).read_text()
     assert "queued_epoch != self.pipeline_epoch" in source
     assert "except zmq.Again" in source
     assert 'self.stats["transport_rejected"] += 1' in source
@@ -100,7 +104,9 @@ def test_live_node_discards_cross_epoch_scans_and_survives_zmq_backpressure() ->
 
 
 def test_live_node_matches_the_recorded_reliable_sensor_publishers() -> None:
-    source = (ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py").read_text()
+    source = (
+        ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py"
+    ).read_text()
     assert "imu_qos = QoSProfile" in source
     assert "lidar_qos = QoSProfile" in source
     assert source.count("reliability=ReliabilityPolicy.RELIABLE") >= 2
@@ -108,14 +114,18 @@ def test_live_node_matches_the_recorded_reliable_sensor_publishers() -> None:
 
 
 def test_live_node_shutdown_is_idempotent_after_sigint() -> None:
-    source = (ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py").read_text()
+    source = (
+        ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py"
+    ).read_text()
     assert "except KeyboardInterrupt:" in source
     assert "if rclpy.ok():" in source
     assert "rclpy.shutdown()" in source
 
 
 def test_live_node_publishes_map_evidence_in_the_kiss_local_frame() -> None:
-    source = (ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py").read_text()
+    source = (
+        ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py"
+    ).read_text()
     assert "output.registered_points_local_xyz_m" in source
     assert "output.registered_cloud_xyz32" in source
     assert 'cloud.header.frame_id = "kiss_local"' in source
@@ -124,7 +134,9 @@ def test_live_node_publishes_map_evidence_in_the_kiss_local_frame() -> None:
 
 
 def test_transient_clock_delay_drops_sample_without_resetting_local_map() -> None:
-    source = (ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py").read_text()
+    source = (
+        ROOT / "g1_root_state_bridge/g1_root_state_bridge/live_node.py"
+    ).read_text()
     assert "classify_clock_estimate" in source
     assert "ClockSampleDisposition.RESET_LANE" in source
     assert "ClockSampleDisposition.ACCEPT" in source
@@ -142,7 +154,7 @@ def test_passive_launcher_names_no_policy_or_command_channel() -> None:
 
 def test_passive_launcher_cleanup_owns_both_producer_and_relay() -> None:
     source = (ROOT / "scripts/run_g1_kiss_live_stack.sh").read_text()
-    assert 'producer_pid=$!' in source
+    assert "producer_pid=$!" in source
     assert 'for pid in "$producer_pid" "$relay_pid"' in source
     assert 'docker stop --time 3 "$container_name"' in source
     assert "--container-name $container_name" in source
@@ -150,6 +162,19 @@ def test_passive_launcher_cleanup_owns_both_producer_and_relay() -> None:
     assert "remote_pid_file" in source
     assert "[g]1_dynamic_capture_relay.*--target-port $lowstate_port" in source
     assert "trap 'exit 143' TERM" in source
+
+
+def test_structural_map_shadow_launcher_is_digest_bound_and_command_incapable() -> None:
+    source = (ROOT / "scripts/run_g1_structural_map_shadow.sh").read_text()
+    assert "sha256sum" in source
+    assert "map_xy_all_5cm" in source
+    assert "g1-structural-map-localization" in source
+    assert "tcp://127.0.0.1:$root_state_port" in source
+    assert "tcp://*:$map_correction_port" in source
+    assert "--read-only" in source
+    assert "command_capability=structurally_unavailable" in source
+    assert "rt/lowcmd" not in source
+    assert "run_amo" not in source
 
 
 def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> None:
@@ -175,13 +200,11 @@ def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> N
 
 
 def test_live_verification_validator_enforces_g1_4123_admission() -> None:
-    source = (
-        ROOT / "scripts/validate_g1_kiss_live_verification.py"
-    ).read_text()
+    source = (ROOT / "scripts/validate_g1_kiss_live_verification.py").read_text()
     assert '== "G1_PELVIS_F_4123"' in source
     assert "== 42" in source
-    assert '>= 0.99' in source
-    assert 'availability >= 0.95' in source
+    assert ">= 0.99" in source
+    assert "availability >= 0.95" in source
     assert '"hardware_actuation_clearance": False' in source
 
 
