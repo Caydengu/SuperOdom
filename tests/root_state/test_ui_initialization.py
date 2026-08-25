@@ -88,6 +88,7 @@ def test_ui_receipt_binds_all_map_identities(tmp_path):
         expected_surface_sha256="b" * 64,
     )
     assert value.frame_id == "kiss_local"
+    assert value.created_realtime_ns == 3_100_000_000
     assert value.fitness == pytest.approx(0.72)
     assert value.map_T_local == pytest.approx(_transform())
 
@@ -144,14 +145,26 @@ def test_engine_emits_ui_transform_as_first_map_packet(tmp_path):
         cond_number=120.0,
         reference_time_ns=1_000_000_000,
         evidence_time_ns=3_000_000_000,
-        application_time_ns=3_100_000_000,
+        application_time_ns=10_000_000_000,
     )
     assert attempt.accepted
     assert attempt.packet is not None
     assert attempt.packet.local_source_epoch == 7
     assert attempt.packet.map_T_local == pytest.approx(_transform())
-    with pytest.raises(StructuralMapLocalizationError, match="fitness gate"):
+    with pytest.raises(StructuralMapLocalizationError, match="stale"):
         engine.bind_local_epoch(8)
+        engine.initialize_from_ui(
+            map_T_local=_transform(),
+            fitness=0.72,
+            rmse_m=0.08,
+            min_eig=0.05,
+            cond_number=120.0,
+            reference_time_ns=1_000_000_000,
+            evidence_time_ns=3_000_000_000,
+            application_time_ns=33_000_000_001,
+        )
+    with pytest.raises(StructuralMapLocalizationError, match="fitness gate"):
+        engine.bind_local_epoch(9)
         engine.initialize_from_ui(
             map_T_local=_transform(),
             fitness=0.2,

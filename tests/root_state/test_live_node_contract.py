@@ -216,6 +216,8 @@ def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> N
     assert 'robot_python=/home/unitree/miniforge3/envs/egonav-deploy/bin/python' in source
     assert '--robot-python "$robot_python"' in source
     assert '"robot_python": "$robot_python"' in source
+    assert "mark_runtime_failed map_initialization" in source
+    assert "no accepted digest-bound map correction" in source
     assert "[1/5] Verifying SSH access" in source
     assert "[2/5] Binding the physical robot fingerprint" in source
     assert "[5/5] Passive relay staged" in source

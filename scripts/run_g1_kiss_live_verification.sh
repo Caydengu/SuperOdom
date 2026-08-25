@@ -155,7 +155,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
 if [[ "$integrated_robot_vlm" == true ]]; then
   command -v docker >/dev/null || { echo "missing command: docker" >&2; exit 2; }
-  image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.1-ui-init-humble}"
+  image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.2-ui-init-humble}"
 else
   image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.4.0-humble}"
 fi
@@ -582,21 +582,26 @@ Open http://localhost:$ui_port, choose "Set initial pose (2 clicks)", then click
   2) a point in the direction the G1 faces
 The pin-locked Snap must pass the receipt gates before this launcher continues.
 EOF
-  docker run --rm --user "$(id -u):$(id -g)" \
-    --network host \
-    --cap-drop ALL \
-    --security-opt no-new-privileges \
-    --read-only \
-    --tmpfs /tmp:rw,noexec,nosuid,size=32m \
-    --volume "$run_dir/runtime:/output:rw" \
-    "$image" \
-    g1-wait-map-correction \
-    --endpoint "tcp://127.0.0.1:$map_correction_port" \
-    --map-sha256 "${structural_map_sha256,,}" \
-    --local-source-epoch "$local_source_epoch" \
-    --timeout-sec "$initialization_timeout_sec" \
-    --output /output/map-readiness.json \
-    >"$run_dir/logs/map-readiness.log" 2>&1
+  if ! docker run --rm --user "$(id -u):$(id -g)" \
+      --network host \
+      --cap-drop ALL \
+      --security-opt no-new-privileges \
+      --read-only \
+      --tmpfs /tmp:rw,noexec,nosuid,size=32m \
+      --volume "$run_dir/runtime:/output:rw" \
+      "$image" \
+      g1-wait-map-correction \
+      --endpoint "tcp://127.0.0.1:$map_correction_port" \
+      --map-sha256 "${structural_map_sha256,,}" \
+      --local-source-epoch "$local_source_epoch" \
+      --timeout-sec "$initialization_timeout_sec" \
+      --output /output/map-readiness.json \
+      >"$run_dir/logs/map-readiness.log" 2>&1; then
+    mark_runtime_failed map_initialization \
+      "no accepted digest-bound map correction arrived before the UI timeout"
+    echo "map initialization failed; inspect $run_dir/logs/map-readiness.log and map_stack.log" >&2
+    exit 5
+  fi
   echo "MAP INITIALIZATION ACCEPTED; robot-vlm now has a map-frame base pose."
 fi
 

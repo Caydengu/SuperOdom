@@ -10,6 +10,7 @@ from g1_root_state_bridge.structural_map_localization import StructuralMapConfig
 from g1_root_state_bridge.structural_map_node import (
     RootEvidenceSnapshot,
     root_evidence_rejection_reason,
+    ui_root_evidence_rejection_reason,
 )
 
 
@@ -83,6 +84,61 @@ def test_root_evidence_rejects_stale_input_before_registration() -> None:
             config=config,
         )
         == "map_evidence_stale_before_registration"
+    )
+
+
+def test_ui_receipt_allows_bounded_icp_latency_without_weakening_live_gate() -> None:
+    config = StructuralMapConfig()
+    evidence = 1_000_000_000
+    created = evidence + 7_000_000_000
+    snapshot = RootEvidenceSnapshot(root_packet(estimate_time_ns=created), created)
+    assert (
+        ui_root_evidence_rejection_reason(
+            snapshot,
+            evidence_time_ns=evidence,
+            receipt_created_ns=created,
+            now_ns=created + 100_000_000,
+            config=config,
+        )
+        is None
+    )
+    assert (
+        root_evidence_rejection_reason(
+            snapshot,
+            evidence_time_ns=evidence,
+            now_ns=created + 100_000_000,
+            config=config,
+        )
+        == "root_evidence_gap"
+    )
+
+
+def test_ui_receipt_rejects_old_result_or_stale_file() -> None:
+    config = StructuralMapConfig()
+    evidence = 1_000_000_000
+    too_late = evidence + config.maximum_ui_initialization_age_ns + 1
+    snapshot = RootEvidenceSnapshot(root_packet(estimate_time_ns=too_late), too_late)
+    assert (
+        ui_root_evidence_rejection_reason(
+            snapshot,
+            evidence_time_ns=evidence,
+            receipt_created_ns=too_late,
+            now_ns=too_late,
+            config=config,
+        )
+        == "ui_initialization_latency"
+    )
+    created = evidence + 1_000_000_000
+    snapshot = RootEvidenceSnapshot(root_packet(estimate_time_ns=created), created)
+    assert (
+        ui_root_evidence_rejection_reason(
+            snapshot,
+            evidence_time_ns=evidence,
+            receipt_created_ns=created,
+            now_ns=created + config.maximum_ui_receipt_age_ns + 1,
+            config=config,
+        )
+        == "ui_receipt_stale"
     )
 
 

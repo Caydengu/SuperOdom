@@ -48,6 +48,8 @@ class StructuralMapConfig:
     maximum_yaw_jump_deg: float = 5.0
     maximum_input_age_ns: int = 500_000_000
     maximum_root_evidence_gap_ns: int = 150_000_000
+    maximum_ui_initialization_age_ns: int = 30_000_000_000
+    maximum_ui_receipt_age_ns: int = 5_000_000_000
     local_height_min_m: float = -1.1
     local_height_max_m: float = 1.3
     query_voxel_resolution_m: float = 0.10
@@ -534,11 +536,17 @@ class AutomaticMapCorrectionEngine:
         evidence_time_ns: int,
         application_time_ns: int,
         icp: dict[str, object],
+        maximum_age_ns: int | None = None,
     ) -> MapCorrectionPacketV1:
         if self.local_source_epoch is None:
             raise StructuralMapLocalizationError("local source epoch is not bound")
         age_ns = application_time_ns - evidence_time_ns
-        if age_ns < 0 or age_ns > self.config.maximum_input_age_ns:
+        age_limit_ns = (
+            self.config.maximum_input_age_ns
+            if maximum_age_ns is None
+            else maximum_age_ns
+        )
+        if age_ns < 0 or age_ns > age_limit_ns:
             raise StructuralMapLocalizationError(
                 "map evidence is stale before publication"
             )
@@ -662,6 +670,7 @@ class AutomaticMapCorrectionEngine:
             evidence_time_ns=evidence_time_ns,
             application_time_ns=now_ns,
             icp=report,
+            maximum_age_ns=self.config.maximum_ui_initialization_age_ns,
         )
         self.rotation = rotation
         self.translation_m = translation

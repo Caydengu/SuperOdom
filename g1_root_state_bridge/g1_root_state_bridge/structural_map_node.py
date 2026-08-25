@@ -73,6 +73,34 @@ def root_evidence_rejection_reason(
     return None
 
 
+def ui_root_evidence_rejection_reason(
+    snapshot: RootEvidenceSnapshot | None,
+    *,
+    evidence_time_ns: int,
+    receipt_created_ns: int,
+    now_ns: int,
+    config: StructuralMapConfig,
+) -> str | None:
+    """Validate a bounded delayed UI result without weakening live-map gates."""
+
+    if snapshot is None:
+        return "root_state_unavailable"
+    packet = snapshot.packet
+    if (packet.health_flags & REQUIRED_ROOT_FUSION_FLAGS) != REQUIRED_ROOT_FUSION_FLAGS:
+        return "root_state_health"
+    if evidence_time_ns <= 0 or evidence_time_ns > receipt_created_ns:
+        return "evidence_clock"
+    if receipt_created_ns > now_ns:
+        return "receipt_clock"
+    if receipt_created_ns - evidence_time_ns > config.maximum_ui_initialization_age_ns:
+        return "ui_initialization_latency"
+    if now_ns - receipt_created_ns > config.maximum_ui_receipt_age_ns:
+        return "ui_receipt_stale"
+    if packet.estimate_time_ns < evidence_time_ns:
+        return "root_state_not_caught_up"
+    return None
+
+
 class RootStateMonitor:
     """Latest-only HSROOT02 subscriber with no command or service capability."""
 
@@ -357,14 +385,20 @@ def run_node(args: argparse.Namespace) -> None:
                 return
             snapshot = self.root.snapshot()
             now_ns = time.time_ns()
-            reason = root_evidence_rejection_reason(
+            reason = ui_root_evidence_rejection_reason(
                 snapshot,
                 evidence_time_ns=receipt.evidence_time_ns,
+                receipt_created_ns=receipt.created_realtime_ns,
                 now_ns=now_ns,
                 config=self.config,
             )
             if reason is not None:
-                if reason in {"evidence_clock", "map_evidence_stale_before_registration"}:
+                if reason in {
+                    "evidence_clock",
+                    "receipt_clock",
+                    "ui_initialization_latency",
+                    "ui_receipt_stale",
+                }:
                     self.last_ui_file_signature = signature
                 self._record_rejection(f"ui_receipt:{reason}")
                 return

@@ -62,6 +62,7 @@ def _transform(value: Any) -> np.ndarray:
 @dataclass(frozen=True)
 class UIMapInitialization:
     content_sha256: str
+    created_realtime_ns: int
     glb_sha256: str
     surface_sha256: str
     structural_map_sha256: str
@@ -104,6 +105,9 @@ def load_ui_map_initialization(
         raise UIInitializationError("receipt was not accepted by the UI")
     if value.get("command_capability") != "structurally_unavailable":
         raise UIInitializationError("receipt must be command-incapable")
+    created_realtime_ns = int(value.get("created_realtime_ns", 0))
+    if created_realtime_ns <= 0:
+        raise UIInitializationError("receipt creation time is invalid")
 
     map_row = value.get("map", {})
     scan = value.get("scan", {})
@@ -181,6 +185,7 @@ def load_ui_map_initialization(
 
     return UIMapInitialization(
         content_sha256=content_sha256,
+        created_realtime_ns=created_realtime_ns,
         glb_sha256=glb_sha256,
         surface_sha256=surface_sha256,
         structural_map_sha256=structural_sha256,
