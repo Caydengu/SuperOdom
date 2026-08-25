@@ -197,8 +197,11 @@ def run_node(args: argparse.Namespace) -> None:
                 maximum_history_sec=max(15.0, args.global_window_sec + 2.0)
             )
             self.root = RootStateMonitor(args.root_endpoint)
-            self.context = zmq.Context()
-            self.publisher = self.context.socket(zmq.PUB)
+            # rclpy.node.Node already exposes a read-only ``context`` property.
+            # Keep the ZeroMQ lifetime under a distinct name so constructing the
+            # ROS node does not overwrite that base-class property.
+            self.zmq_context = zmq.Context()
+            self.publisher = self.zmq_context.socket(zmq.PUB)
             self.publisher.setsockopt(zmq.SNDHWM, 1)
             self.publisher.setsockopt(zmq.LINGER, 0)
             self.publisher.bind(args.map_bind)
@@ -498,16 +501,19 @@ def run_node(args: argparse.Namespace) -> None:
             self.worker.join(timeout=2.0)
             self.root.close()
             self.publisher.close(linger=0)
-            self.context.term()
+            self.zmq_context.term()
 
     rclpy.init()
     node = G1StructuralMapNode()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.close()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 def main() -> None:

@@ -37,7 +37,7 @@ mkdir -p "$qualification_dir" "$run_dir/logs"
 
 export PYTHONPATH="$repo_root/g1_root_state_bridge"
 set -o pipefail
-localization_image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.0-ui-init-humble}"
+localization_image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.1-ui-init-humble}"
 docker run --rm --entrypoint /bin/bash \
   --volume "$repo_root:/repo:ro" \
   "$localization_image" -lc \

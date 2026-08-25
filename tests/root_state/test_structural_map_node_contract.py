@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from g1_root_state_bridge.protocol import (
     REQUIRED_ROOT_FUSION_FLAGS,
     RootStatePacketV2,
@@ -9,6 +11,9 @@ from g1_root_state_bridge.structural_map_node import (
     RootEvidenceSnapshot,
     root_evidence_rejection_reason,
 )
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def root_packet(
@@ -79,3 +84,21 @@ def test_root_evidence_rejects_stale_input_before_registration() -> None:
         )
         == "map_evidence_stale_before_registration"
     )
+
+
+def test_structural_map_zmq_context_does_not_shadow_rclpy_node_context() -> None:
+    source = (
+        ROOT / "g1_root_state_bridge/g1_root_state_bridge/structural_map_node.py"
+    ).read_text()
+    assert "self.zmq_context = zmq.Context()" in source
+    assert "self.publisher = self.zmq_context.socket(zmq.PUB)" in source
+    assert "self.zmq_context.term()" in source
+    assert "self.context = zmq.Context()" not in source
+
+
+def test_structural_map_shutdown_is_idempotent_after_sigint() -> None:
+    source = (
+        ROOT / "g1_root_state_bridge/g1_root_state_bridge/structural_map_node.py"
+    ).read_text()
+    assert "except KeyboardInterrupt:" in source
+    assert "if rclpy.ok():" in source

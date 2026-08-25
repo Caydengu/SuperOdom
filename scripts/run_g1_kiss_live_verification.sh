@@ -155,7 +155,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
 if [[ "$integrated_robot_vlm" == true ]]; then
   command -v docker >/dev/null || { echo "missing command: docker" >&2; exit 2; }
-  image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.0-ui-init-humble}"
+  image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.1-ui-init-humble}"
 else
   image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.4.0-humble}"
 fi
@@ -362,6 +362,25 @@ PY
   exit 4
 }
 
+mark_runtime_failed() {
+  local stage=$1
+  local detail=$2
+  python3 - "$run_dir/manifest.json" "$stage" "$detail" <<'PY'
+import json
+import pathlib
+import sys
+import time
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["status"] = "implementation_failed"
+value["failure_stage"] = sys.argv[2]
+value["failure_detail"] = sys.argv[3]
+value["failed_realtime_ns"] = time.time_ns()
+path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
 echo "[1/5] Verifying SSH access to $robot_user@$robot_host..."
 if ssh "${ssh_options[@]}" "$robot_user@$robot_host" true >>"$robot_preflight_log" 2>&1; then
   echo "[1/5] SSH access verified."
@@ -539,8 +558,16 @@ if [[ "$integrated_robot_vlm" == true ]]; then
     >"$run_dir/logs/ui.log" 2>&1 &
   ui_pid=$!
   sleep 3
-  kill -0 "$map_pid" 2>/dev/null || { echo "map lane exited during startup; inspect $run_dir/logs/map_stack.log" >&2; exit 5; }
-  kill -0 "$ui_pid" 2>/dev/null || { echo "Gio UI exited during startup; inspect $run_dir/logs/ui.log" >&2; exit 5; }
+  if ! kill -0 "$map_pid" 2>/dev/null; then
+    mark_runtime_failed structural_map_startup "map lane exited before UI initialization"
+    echo "map lane exited during startup; inspect $run_dir/logs/map_stack.log" >&2
+    exit 5
+  fi
+  if ! kill -0 "$ui_pid" 2>/dev/null; then
+    mark_runtime_failed robot_vlm_ui_startup "Gio UI exited before pose initialization"
+    echo "Gio UI exited during startup; inspect $run_dir/logs/ui.log" >&2
+    exit 5
+  fi
   cat <<EOF
 LOCAL ODOMETRY READY. Keep G1-4123 stationary.
 Open http://localhost:$ui_port, choose "Set initial pose (2 clicks)", then click:
