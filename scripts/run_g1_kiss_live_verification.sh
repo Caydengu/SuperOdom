@@ -16,7 +16,9 @@ Options:
   --robot-host IP              default: 192.168.123.164
   --robot-user USER            default: unitree
   --robot-dds-interface IFACE  default: eth0
-  --robot-python PATH          default: G1-4123 sim2sim Python
+  --robot-python PATH          default: G1-4123 egonav-deploy Python
+  --expected-robot-machine-id-sha256 HEX
+                               reject a different physical robot at the same IP
   --motive-server IP           default: 172.24.68.77
   --motive-mode MODE           required|disabled; default: required
   --rigid-body-id ID           default: 42
@@ -50,7 +52,8 @@ capture_class=stationary
 robot_host=192.168.123.164
 robot_user=unitree
 robot_dds_interface=eth0
-robot_python=/home/unitree/miniconda3/envs/sim2sim/bin/python
+robot_python=/home/unitree/miniforge3/envs/egonav-deploy/bin/python
+expected_robot_machine_id_sha256=""
 robot_localization_root=/home/unitree/geo-179/G1_localization
 motive_server=172.24.68.77
 motive_mode=required
@@ -87,6 +90,7 @@ while (( $# )); do
     --robot-user) robot_user=$2; shift 2 ;;
     --robot-dds-interface) robot_dds_interface=$2; shift 2 ;;
     --robot-python) robot_python=$2; shift 2 ;;
+    --expected-robot-machine-id-sha256) expected_robot_machine_id_sha256=$2; shift 2 ;;
     --motive-server) motive_server=$2; shift 2 ;;
     --motive-mode) motive_mode=$2; shift 2 ;;
     --rigid-body-id) rigid_body_id=$2; shift 2 ;;
@@ -139,6 +143,13 @@ for value in "$network_interface" "$robot_dds_interface" "$robot_user" "$rigid_b
   [[ "$value" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "unsafe identifier: $value" >&2; exit 2; }
 done
 [[ "$robot_python" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "invalid robot Python path" >&2; exit 2; }
+if [[ -n "$expected_robot_machine_id_sha256" ]]; then
+  [[ "$expected_robot_machine_id_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || {
+    echo "expected robot machine-ID digest must contain 64 hexadecimal characters" >&2
+    exit 2
+  }
+  expected_robot_machine_id_sha256="${expected_robot_machine_id_sha256,,}"
+fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
@@ -240,6 +251,7 @@ duration_sec=$duration_sec
 capture_class=$capture_class
 robot=$robot_user@$robot_host
 robot_interface=$network_interface
+expected_robot_machine_id_sha256=$expected_robot_machine_id_sha256
 motive_mode=$motive_mode
 motive=$motive_server client=$motive_client_address
 rigid_body=$rigid_body_name id=$rigid_body_id
@@ -293,6 +305,7 @@ pathlib.Path(r"$run_dir/manifest.json").write_text(json.dumps({
   "robot_host": "$robot_host",
   "robot_network_interface": "$network_interface",
   "robot_python": "$robot_python",
+  "expected_robot_machine_id_sha256": "$expected_robot_machine_id_sha256",
   "motive_server": "$motive_server",
   "motive_client_address": "$motive_client_address",
   "rigid_body_id": $rigid_body_id,
@@ -349,33 +362,61 @@ PY
   exit 4
 }
 
-echo "[1/4] Verifying SSH access to $robot_user@$robot_host..."
+echo "[1/5] Verifying SSH access to $robot_user@$robot_host..."
 if ssh "${ssh_options[@]}" "$robot_user@$robot_host" true >>"$robot_preflight_log" 2>&1; then
-  echo "[1/4] SSH access verified."
+  echo "[1/5] SSH access verified."
 else
   command_status=$?
   mark_preflight_failed ssh_access "$command_status"
 fi
 
-echo "[2/4] Verifying onboard Python: $robot_python"
+echo "[2/5] Binding the physical robot fingerprint..."
+if machine_id_output="$(ssh "${ssh_options[@]}" "$robot_user@$robot_host" \
+  "sha256sum /etc/machine-id" 2>>"$robot_preflight_log")"; then
+  actual_robot_machine_id_sha256="$(awk '{print $1}' <<<"$machine_id_output")"
+else
+  command_status=$?
+  mark_preflight_failed robot_machine_id_probe "$command_status"
+fi
+if [[ ! "$actual_robot_machine_id_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+  mark_preflight_failed robot_machine_id_invalid 4
+fi
+printf 'robot_machine_id_sha256=%s\n' "$actual_robot_machine_id_sha256" >>"$robot_preflight_log"
+if [[ -n "$expected_robot_machine_id_sha256" && \
+      "$actual_robot_machine_id_sha256" != "$expected_robot_machine_id_sha256" ]]; then
+  mark_preflight_failed wrong_robot_identity 4
+fi
+python3 - "$run_dir/manifest.json" "$actual_robot_machine_id_sha256" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["robot_machine_id_sha256"] = sys.argv[2]
+path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+echo "[2/5] Physical robot fingerprint accepted: ${actual_robot_machine_id_sha256:0:12}..."
+
+echo "[3/5] Verifying onboard Python: $robot_python"
 if ssh "${ssh_options[@]}" "$robot_user@$robot_host" "test -x '$robot_python'" >>"$robot_preflight_log" 2>&1; then
-  echo "[2/4] Onboard Python verified."
+  echo "[3/5] Onboard Python verified."
 else
   command_status=$?
   mark_preflight_failed robot_python "$command_status"
 fi
 
-echo "[3/4] Verifying passive LowState SDK imports..."
+echo "[4/5] Verifying passive LowState SDK imports..."
 if ssh "${ssh_options[@]}" "$robot_user@$robot_host" \
   "'$robot_python' -c 'from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber; from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_'" \
   >>"$robot_preflight_log" 2>&1; then
-  echo "[3/4] Passive LowState SDK imports verified."
+  echo "[4/5] Passive LowState SDK imports verified."
 else
   command_status=$?
   mark_preflight_failed unitree_sdk_import "$command_status"
 fi
 
-echo "[4/4] Staging the command-incapable LowState relay..."
+echo "[5/5] Staging the command-incapable LowState relay..."
 if ssh "${ssh_options[@]}" "$robot_user@$robot_host" "mkdir -p '$remote_stage'" >>"$robot_preflight_log" 2>&1; then
   :
 else
@@ -384,7 +425,7 @@ else
 fi
 if scp -q "${ssh_options[@]}" -r "$repo_root/g1_root_state_bridge/g1_root_state_bridge" \
   "$robot_user@$robot_host:$remote_stage/" >>"$robot_preflight_log" 2>&1; then
-  echo "[4/4] Passive relay staged."
+  echo "[5/5] Passive relay staged."
 else
   command_status=$?
   mark_preflight_failed remote_stage_copy "$command_status"

@@ -86,7 +86,8 @@ if [[ "$without_motive_ground_truth" == false ]]; then
 fi
 
 robot_host=192.168.123.164
-robot_python=/home/unitree/miniconda3/envs/sim2sim/bin/python
+robot_python=/home/unitree/miniforge3/envs/egonav-deploy/bin/python
+robot_machine_id_sha256=9fd82e8a530408897fdd47c7c1b2f4314778a91339fcedd5db07a03b8c2b1d20
 route_to_robot="$(ip route get "$robot_host" | head -1)"
 network_interface="$(awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' <<<"$route_to_robot")"
 [[ -n "$network_interface" ]] || { echo "could not resolve the G1 network interface: $route_to_robot" >&2; exit 4; }
@@ -96,6 +97,7 @@ command=(
   --run-dir "$run_dir"
   --network-interface "$network_interface"
   --robot-python "$robot_python"
+  --expected-robot-machine-id-sha256 "$robot_machine_id_sha256"
   --duration-sec "$duration_sec"
   --capture-class "$capture_class"
   --motive-server 172.24.68.77
@@ -126,6 +128,7 @@ echo "  class: $capture_class"
 echo "  duration: ${duration_sec}s"
 echo "  G1 interface: $network_interface"
 echo "  G1 Python: $robot_python"
+echo "  G1 fingerprint: ${robot_machine_id_sha256:0:12}..."
 echo "  Gio UI: http://localhost:8082"
 if [[ "$without_motive_ground_truth" == true ]]; then
   echo "  Motive ground truth: disabled (absolute accuracy is not scored)"

@@ -17,7 +17,7 @@ Options:
   --robot-user USER               default: unitree
   --offboard-robot-address IP     default: resolve from route to robot
   --robot-dds-interface IFACE     default: eth0
-  --robot-python PATH             default: G1-4123 sim2sim Python
+  --robot-python PATH             default: G1-4123 egonav-deploy Python
   --ros-domain-id ID              default: 0
   --lowstate-port PORT            default: 5589
   --root-state-port PORT          default: 5575
@@ -31,7 +31,7 @@ robot_host=192.168.123.164
 robot_user=unitree
 offboard_robot_address=""
 robot_dds_interface=eth0
-robot_python=/home/unitree/miniconda3/envs/sim2sim/bin/python
+robot_python=/home/unitree/miniforge3/envs/egonav-deploy/bin/python
 ros_domain_id=0
 lowstate_port=5589
 root_state_port=5575
