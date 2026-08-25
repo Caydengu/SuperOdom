@@ -67,3 +67,31 @@ def test_initial_relative_comparison_removes_only_local_origin_offset(tmp_path: 
     assert report["status"] == "pass"
     assert report["raw_planar_rmse_m"] == pytest.approx(0.1)
     assert report["planar_rmse_m"] == pytest.approx(0.0)
+
+
+def test_comparison_uses_lowstate_sequence_when_source_clocks_are_remapped(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate.jsonl"
+    reference = tmp_path / "reference.jsonl"
+    _write(candidate, "candidate", 0.001)
+    _write(reference, "reference", 0.0)
+    rows = [json.loads(line) for line in candidate.read_text().splitlines()]
+    for row in rows:
+        if row.get("kind") == "pose":
+            row["source_time_ns"] += 2_000_000
+    candidate.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    report = compare(
+        argparse.Namespace(
+            candidate=candidate,
+            candidate_treatment="candidate",
+            reference=reference,
+            reference_treatment="reference",
+            minimum_reference_coverage=0.995,
+            maximum_planar_rmse_m=0.01,
+            maximum_yaw_rmse_deg=0.5,
+            pose_comparison="raw",
+        )
+    )
+    assert report["status"] == "pass"
+    assert report["match_key"] == "source_lowstate_sequence"
+    assert report["exact_timestamp_overlap"] == 0
+    assert report["matched_timestamp_delta_ms"]["p95"] == pytest.approx(2.0)

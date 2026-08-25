@@ -68,6 +68,7 @@ class LiveLocalizationConfig:
     gyro_bias_radps: tuple[float, float, float]
     sensor_z_to_torso_yaw_sign: float = -1.0
     maximum_imu_gap_ns: int = 25_000_000
+    maximum_imu_bridge_gap_ns: int = 40_000_000
     maximum_joint_gap_ns: int = 10_000_000
     maximum_correction_age_ns: int = 150_000_000
     imu_buffer_capacity: int = 4_096
@@ -88,11 +89,16 @@ class LiveLocalizationConfig:
             raise LiveLocalizationError("sensor yaw sign must be exactly -1 or +1")
         if min(
             self.maximum_imu_gap_ns,
+            self.maximum_imu_bridge_gap_ns,
             self.maximum_joint_gap_ns,
             self.maximum_correction_age_ns,
             self.imu_buffer_capacity,
         ) <= 0:
             raise LiveLocalizationError("buffer and timing limits must be positive")
+        if self.maximum_imu_bridge_gap_ns < self.maximum_imu_gap_ns:
+            raise LiveLocalizationError(
+                "IMU bridge limit must be at least the nominal gap limit"
+            )
 
     @property
     def calibration_digest(self) -> bytes:
@@ -101,6 +107,8 @@ class LiveLocalizationConfig:
                 "schema": "g1_4123_kiss_live_localization_calibration_v1",
                 "gyro_bias_radps": self.gyro_bias_radps,
                 "sensor_z_to_torso_yaw_sign": self.sensor_z_to_torso_yaw_sign,
+                "maximum_imu_gap_ns": self.maximum_imu_gap_ns,
+                "maximum_imu_bridge_gap_ns": self.maximum_imu_bridge_gap_ns,
                 "waist_chain": "g1_pelvis_mid360_kinematics_v1",
                 "heading": "livox_torso_navigation_yaw_without_waist_subtraction",
                 "point_time": "float32_seconds_relative_to_scan_header",
@@ -120,38 +128,51 @@ class PipelineOutput:
     registered_cloud_xyz32: bytes
     adaptive_threshold: float
     deskew_angular_excursion_deg: float
+    bridged_imu_gap_ns: int
     source_joint_sequence: int
     source_joint_time_ns: int
     stage_runtime_ms: dict[str, float]
 
 
 class _ImuYawBuffer:
-    def __init__(self, *, capacity: int, bias_z: float, sign: float, maximum_gap_ns: int) -> None:
-        self._samples: deque[tuple[int, np.ndarray, float]] = deque(maxlen=capacity)
+    def __init__(
+        self,
+        *,
+        capacity: int,
+        bias_z: float,
+        sign: float,
+        maximum_gap_ns: int,
+        maximum_bridge_gap_ns: int,
+    ) -> None:
+        self._samples: deque[tuple[int, np.ndarray, float, int]] = deque(maxlen=capacity)
         self._bias_z = float(bias_z)
         self._sign = float(sign)
         self._maximum_gap_ns = maximum_gap_ns
+        self._maximum_bridge_gap_ns = maximum_bridge_gap_ns
         self._torso_yaw = 0.0
 
     def clear(self) -> None:
         self._samples.clear()
         self._torso_yaw = 0.0
 
-    def append(self, time_ns: int, angular_velocity_radps: np.ndarray) -> None:
+    def append(self, time_ns: int, angular_velocity_radps: np.ndarray) -> int:
         angular = np.asarray(angular_velocity_radps, dtype=np.float64)
         if not isinstance(time_ns, int) or time_ns <= 0 or angular.shape != (3,) or not np.all(np.isfinite(angular)):
             raise LiveLocalizationError("IMU sample is invalid")
         if self._samples:
-            previous_time, previous_angular, _ = self._samples[-1]
+            previous_time, previous_angular, _, _ = self._samples[-1]
             if time_ns <= previous_time:
                 raise LiveLocalizationError("IMU timestamp did not increase")
             gap_ns = time_ns - previous_time
-            if gap_ns > self._maximum_gap_ns:
+            if gap_ns > self._maximum_bridge_gap_ns:
                 raise ImuSampleGap(gap_ns)
             previous_rate = self._sign * (previous_angular[2] - self._bias_z)
             current_rate = self._sign * (angular[2] - self._bias_z)
             self._torso_yaw += 0.5 * (previous_rate + current_rate) * gap_ns * 1e-9
-        self._samples.append((time_ns, angular.copy(), self._torso_yaw))
+        else:
+            gap_ns = 0
+        self._samples.append((time_ns, angular.copy(), self._torso_yaw, gap_ns))
+        return gap_ns if gap_ns > self._maximum_gap_ns else 0
 
     def restart_after_gap(
         self,
@@ -165,9 +186,11 @@ class _ImuYawBuffer:
         if not np.all(np.isfinite(angular)):
             raise LiveLocalizationError("IMU restart sample is invalid")
         self._samples.clear()
-        self._samples.append((time_ns, angular.copy(), self._torso_yaw))
+        self._samples.append((time_ns, angular.copy(), self._torso_yaw, 0))
 
-    def arrays_for_scan(self, start_time_ns: int, end_time_ns: int) -> tuple[np.ndarray, np.ndarray]:
+    def _values_for_scan(
+        self, start_time_ns: int, end_time_ns: int
+    ) -> list[tuple[int, np.ndarray, float, int]]:
         if len(self._samples) < 2:
             raise LiveLocalizationError("IMU buffer has fewer than two samples")
         values = list(self._samples)
@@ -178,10 +201,20 @@ class _ImuYawBuffer:
             raise LiveLocalizationError("IMU buffer starts after the scan")
         if after >= len(values):
             raise ImuCoveragePending(end_time_ns - int(time_values[-1]))
-        selected = values[before : after + 1]
+        return values[before : after + 1]
+
+    def arrays_for_scan(self, start_time_ns: int, end_time_ns: int) -> tuple[np.ndarray, np.ndarray]:
+        selected = self._values_for_scan(start_time_ns, end_time_ns)
         return (
             np.asarray([sample[0] for sample in selected], dtype=np.int64),
             np.asarray([sample[1] for sample in selected], dtype=np.float64),
+        )
+
+    def maximum_bridged_gap_for_scan(self, start_time_ns: int, end_time_ns: int) -> int:
+        selected = self._values_for_scan(start_time_ns, end_time_ns)
+        return max(
+            (sample[3] for sample in selected if sample[3] > self._maximum_gap_ns),
+            default=0,
         )
 
     def torso_yaw_at(self, query_time_ns: int) -> float:
@@ -226,6 +259,7 @@ class SelectedLocalizationPipeline:
             bias_z=config.gyro_bias_radps[2],
             sign=config.sensor_z_to_torso_yaw_sign,
             maximum_gap_ns=config.maximum_imu_gap_ns,
+            maximum_bridge_gap_ns=config.maximum_imu_bridge_gap_ns,
         )
         self.packet_builder = KissPelvisPacketBuilder(
             calibration_digest=config.calibration_digest,
@@ -259,8 +293,8 @@ class SelectedLocalizationPipeline:
             reset_registration()
         self._registration_initialized = False
 
-    def append_imu(self, time_ns: int, angular_velocity_radps: np.ndarray) -> None:
-        self.imu.append(time_ns, angular_velocity_radps)
+    def append_imu(self, time_ns: int, angular_velocity_radps: np.ndarray) -> int:
+        return self.imu.append(time_ns, angular_velocity_radps)
 
     def restart_imu_after_gap(
         self,
@@ -350,6 +384,9 @@ class SelectedLocalizationPipeline:
             scan_start_time_ns=scan_start_time_ns,
         )
         imu_time_ns, imu_angular = self.imu.arrays_for_scan(scan_start_time_ns, scan_end_time_ns)
+        bridged_imu_gap_ns = self.imu.maximum_bridged_gap_for_scan(
+            scan_start_time_ns, scan_end_time_ns
+        )
         stage_start = time.perf_counter_ns()
         try:
             deskewed, estimate_time_ns, excursion_deg = gyro_deskew_scan(
@@ -422,8 +459,8 @@ class SelectedLocalizationPipeline:
             local_T_pelvis=local_T_pelvis,
             covariance_diagonal=self.config.covariance_diagonal,
             registration_valid=True,
-            deskew_valid=True,
-            heading_valid=True,
+            deskew_valid=bridged_imu_gap_ns == 0,
+            heading_valid=bridged_imu_gap_ns == 0,
             calibration_valid=calibration_valid,
             clock_valid=clock_valid,
         )
@@ -439,6 +476,7 @@ class SelectedLocalizationPipeline:
             registered_cloud_xyz32=registered_cloud_xyz32,
             adaptive_threshold=registration.adaptive_threshold,
             deskew_angular_excursion_deg=excursion_deg,
+            bridged_imu_gap_ns=bridged_imu_gap_ns,
             source_joint_sequence=synchronized.representative_sequence,
             source_joint_time_ns=synchronized.representative_time_ns,
             stage_runtime_ms={

@@ -102,6 +102,9 @@ def test_live_node_discards_cross_epoch_scans_and_survives_zmq_backpressure() ->
     assert "assert_scan_sources_ready" in source
     assert '"stage_runtime_ms"' in source
     assert '"pose_age_ms"' in source
+    assert "--maximum-imu-gap-ms" in source
+    assert "--maximum-imu-bridge-gap-ms" in source
+    assert 'self.stats["imu_gap_bridges"] += 1' in source
 
 
 def test_live_node_matches_the_recorded_reliable_sensor_publishers() -> None:

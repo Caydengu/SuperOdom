@@ -155,7 +155,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
 if [[ "$integrated_robot_vlm" == true ]]; then
   command -v docker >/dev/null || { echo "missing command: docker" >&2; exit 2; }
-  image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.2-ui-init-humble}"
+  image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.3-imu-gap-bridge-humble}"
 else
   image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.4.0-humble}"
 fi

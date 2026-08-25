@@ -39,21 +39,38 @@ def _load_track(path: Path, treatment: str) -> dict[int, tuple[np.ndarray, float
 def compare(args: argparse.Namespace) -> dict[str, object]:
     candidate = _load_track(args.candidate, args.candidate_treatment)
     reference = _load_track(args.reference, args.reference_treatment)
-    common = sorted(candidate.keys() & reference.keys())
-    if len(common) < 3:
-        raise ValueError("fewer than three exact source timestamps overlap")
-    candidate_position = np.asarray([candidate[time_ns][0] for time_ns in common])
-    reference_position = np.asarray([reference[time_ns][0] for time_ns in common])
-    candidate_yaw = np.asarray([candidate[time_ns][1] for time_ns in common])
-    reference_yaw = np.asarray([reference[time_ns][1] for time_ns in common])
+    exact_common = sorted(candidate.keys() & reference.keys())
+    candidate_sequence = {
+        value[2]: time_ns
+        for time_ns, value in candidate.items()
+        if value[2] is not None
+    }
+    reference_sequence = {
+        value[2]: time_ns
+        for time_ns, value in reference.items()
+        if value[2] is not None
+    }
+    common_sequence = sorted(candidate_sequence.keys() & reference_sequence.keys())
+    if len(common_sequence) >= 3:
+        matches = [
+            (candidate_sequence[sequence], reference_sequence[sequence])
+            for sequence in common_sequence
+        ]
+        match_key = "source_lowstate_sequence"
+    elif len(exact_common) >= 3:
+        matches = [(time_ns, time_ns) for time_ns in exact_common]
+        match_key = "exact_source_time_ns"
+    else:
+        raise ValueError("fewer than three semantic replay samples overlap")
+    candidate_position = np.asarray([candidate[left][0] for left, _ in matches])
+    reference_position = np.asarray([reference[right][0] for _, right in matches])
+    candidate_yaw = np.asarray([candidate[left][1] for left, _ in matches])
+    reference_yaw = np.asarray([reference[right][1] for _, right in matches])
     raw_delta_position = candidate_position - reference_position
     raw_delta_yaw = np.asarray(
         [
-            math.atan2(
-                math.sin(candidate[time_ns][1] - reference[time_ns][1]),
-                math.cos(candidate[time_ns][1] - reference[time_ns][1]),
-            )
-            for time_ns in common
+            math.atan2(math.sin(left - right), math.cos(left - right))
+            for left, right in zip(candidate_yaw, reference_yaw)
         ]
     )
     pose_comparison = getattr(args, "pose_comparison", "raw")
@@ -87,11 +104,14 @@ def compare(args: argparse.Namespace) -> dict[str, object]:
     else:
         raise ValueError(f"unsupported pose comparison: {pose_comparison}")
     sequence_pairs = [
-        (candidate[time_ns][2], reference[time_ns][2])
-        for time_ns in common
-        if candidate[time_ns][2] is not None and reference[time_ns][2] is not None
+        (candidate[left][2], reference[right][2])
+        for left, right in matches
+        if candidate[left][2] is not None and reference[right][2] is not None
     ]
-    coverage = len(common) / len(reference)
+    timestamp_delta_ms = np.asarray(
+        [abs(left - right) * 1e-6 for left, right in matches], dtype=np.float64
+    )
+    coverage = len(matches) / len(reference)
     planar_rmse_m = float(np.sqrt(np.mean(np.sum(delta_position[:, :2] ** 2, axis=1))))
     yaw_rmse_deg = float(np.degrees(np.sqrt(np.mean(delta_yaw**2))))
     raw_planar_rmse_m = float(
@@ -112,7 +132,14 @@ def compare(args: argparse.Namespace) -> dict[str, object]:
         "reference_treatment": args.reference_treatment,
         "candidate_samples": len(candidate),
         "reference_samples": len(reference),
-        "exact_timestamp_overlap": len(common),
+        "matched_samples": len(matches),
+        "match_key": match_key,
+        "exact_timestamp_overlap": len(exact_common),
+        "matched_timestamp_delta_ms": {
+            "p50": float(np.quantile(timestamp_delta_ms, 0.50)),
+            "p95": float(np.quantile(timestamp_delta_ms, 0.95)),
+            "maximum": float(np.max(timestamp_delta_ms)),
+        },
         "reference_coverage": coverage,
         "pose_comparison": pose_comparison,
         "planar_rmse_m": planar_rmse_m,

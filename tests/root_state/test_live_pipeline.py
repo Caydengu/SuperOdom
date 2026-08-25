@@ -6,6 +6,7 @@ from g1_root_state_bridge.joint_contract import (
 )
 from g1_root_state_bridge.kiss_registration import RegistrationResult
 from g1_root_state_bridge.live_pipeline import (
+    ImuSampleGap,
     ImuCoveragePending,
     JointCoveragePending,
     LiveLocalizationConfig,
@@ -262,6 +263,73 @@ def test_imu_gap_restart_preserves_registration_and_heading_state() -> None:
     assert pipeline.imu._torso_yaw == yaw_before
     assert registration.index == 1
     assert pipeline._registration_initialized
+
+
+def test_bounded_imu_gap_is_bridged_but_affected_scan_is_not_false_healthy() -> None:
+    pipeline = SelectedLocalizationPipeline(
+        FakeRegistration(),
+        LiveLocalizationConfig(
+            gyro_bias_radps=(0.0, 0.0, 0.0),
+            maximum_imu_gap_ns=25_000_000,
+            maximum_imu_bridge_gap_ns=40_000_000,
+        ),
+    )
+    start = 3_100_000_000
+    imu_stamps = [start - 10_000_000, start - 5_000_000, start]
+    imu_stamps += list(range(start + 30_000_000, start + 205_000_001, 5_000_000))
+    for stamp in imu_stamps:
+        pipeline.append_imu(stamp, np.asarray((0.0, 0.0, -0.5)))
+    for index, stamp in enumerate(range(start - 10_000_000, start + 205_000_001, 5_000_000)):
+        pipeline.append_joint(_joint(stamp, index))
+    points = np.tile(np.asarray(((1.0, 0.0, 0.0),)), (20, 1))
+    relative = np.linspace(0.0, 0.1, 20)
+    bridged = pipeline.process_scan(
+        points,
+        relative,
+        scan_start_time_ns=start,
+        publish_time_ns=start + 120_000_000,
+    )
+    assert bridged.bridged_imu_gap_ns == 30_000_000
+    assert (
+        bridged.packet.health_flags & REQUIRED_ROOT_FUSION_FLAGS
+    ) != REQUIRED_ROOT_FUSION_FLAGS
+    assert not bridged.packet.health_flags & RootStateHealth.INERTIAL_DESKEW_VALID
+    assert not bridged.packet.health_flags & RootStateHealth.HEADING_VALID
+
+    recovered = pipeline.process_scan(
+        points,
+        relative,
+        scan_start_time_ns=start + 100_000_000,
+        publish_time_ns=start + 220_000_000,
+    )
+    assert recovered.bridged_imu_gap_ns == 0
+    assert (
+        recovered.packet.health_flags & REQUIRED_ROOT_FUSION_FLAGS
+    ) == REQUIRED_ROOT_FUSION_FLAGS
+
+
+def test_imu_gap_above_bridge_limit_still_fails_closed() -> None:
+    pipeline = SelectedLocalizationPipeline(
+        FakeRegistration(),
+        LiveLocalizationConfig(
+            gyro_bias_radps=(0.0, 0.0, 0.0),
+            maximum_imu_gap_ns=25_000_000,
+            maximum_imu_bridge_gap_ns=40_000_000,
+        ),
+    )
+    pipeline.append_imu(3_500_000_000, np.zeros(3))
+    with pytest.raises(ImuSampleGap) as caught:
+        pipeline.append_imu(3_545_000_000, np.zeros(3))
+    assert caught.value.gap_ns == 45_000_000
+
+
+def test_imu_bridge_limit_cannot_be_stricter_than_nominal_limit() -> None:
+    with pytest.raises(LiveLocalizationError, match="bridge limit"):
+        LiveLocalizationConfig(
+            gyro_bias_radps=(0.0, 0.0, 0.0),
+            maximum_imu_gap_ns=25_000_000,
+            maximum_imu_bridge_gap_ns=20_000_000,
+        )
 
 
 def test_source_preflight_admits_scan_without_advancing_registration() -> None:

@@ -176,6 +176,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clock-maximum-residual-p95-ms", type=float, default=5.0)
     parser.add_argument("--clock-maximum-transport-delay-ms", type=float, default=10.0)
     parser.add_argument("--source-coverage-wait-ms", type=float, default=30.0)
+    parser.add_argument("--maximum-imu-gap-ms", type=float, default=25.0)
+    parser.add_argument("--maximum-imu-bridge-gap-ms", type=float, default=40.0)
     return parser.parse_args()
 
 
@@ -215,7 +217,13 @@ def run_node(args: argparse.Namespace) -> None:
                     minimum_range_m=args.minimum_range_m,
                     maximum_range_m=args.maximum_range_m,
                 ),
-                LiveLocalizationConfig(gyro_bias_radps=tuple(args.gyro_bias_radps)),
+                LiveLocalizationConfig(
+                    gyro_bias_radps=tuple(args.gyro_bias_radps),
+                    maximum_imu_gap_ns=round(args.maximum_imu_gap_ms * 1e6),
+                    maximum_imu_bridge_gap_ns=round(
+                        args.maximum_imu_bridge_gap_ms * 1e6
+                    ),
+                ),
             )
             self.lock = threading.RLock()
             self.active = False
@@ -243,6 +251,7 @@ def run_node(args: argparse.Namespace) -> None:
                 "joint_wait_retries": 0,
                 "joint_wait_timeouts": 0,
                 "imu_gap_restarts": 0,
+                "imu_gap_bridges": 0,
             }
             self.rejection_reasons: dict[str, int] = {}
             self.runtime_samples_ms: dict[str, deque[float]] = {}
@@ -333,6 +342,10 @@ def run_node(args: argparse.Namespace) -> None:
                 return
             config = LiveLocalizationConfig(
                 gyro_bias_radps=calibration.bias_radps,
+                maximum_imu_gap_ns=round(args.maximum_imu_gap_ms * 1e6),
+                maximum_imu_bridge_gap_ns=round(
+                    args.maximum_imu_bridge_gap_ms * 1e6
+                ),
             )
             self.pipeline = SelectedLocalizationPipeline(
                 KissRegistration(
@@ -429,8 +442,15 @@ def run_node(args: argparse.Namespace) -> None:
                     self.stats["clock_rejected"] += 1
                     return
                 try:
-                    self.pipeline.append_imu(estimate.mapped_time_ns, angular)
+                    bridged_gap_ns = self.pipeline.append_imu(
+                        estimate.mapped_time_ns, angular
+                    )
                     self.stats["imu"] += 1
+                    if bridged_gap_ns:
+                        self.stats["imu_gap_bridges"] += 1
+                        self._record_rejection(
+                            f"imu_pipeline_bounded_gap_bridge:{bridged_gap_ns}ns"
+                        )
                 except ImuSampleGap as error:
                     self.pipeline.restart_imu_after_gap(
                         estimate.mapped_time_ns,

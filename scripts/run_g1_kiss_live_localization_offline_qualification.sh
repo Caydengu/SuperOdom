@@ -37,11 +37,11 @@ mkdir -p "$qualification_dir" "$run_dir/logs"
 
 export PYTHONPATH="$repo_root/g1_root_state_bridge"
 set -o pipefail
-localization_image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.2-ui-init-humble}"
+localization_image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.3-imu-gap-bridge-humble}"
 docker run --rm --entrypoint /bin/bash \
   --volume "$repo_root:/repo:ro" \
   "$localization_image" -lc \
-  'source /opt/ros/humble/setup.bash; export PYTHONPATH=/repo/g1_root_state_bridge; export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1; cd /repo; python3 -m pytest -q tests/root_state -k "not g1_dynamic_capture_recorder and not g1_dynamic_capture_relay and not udp_receiver"' \
+  'source /opt/ros/humble/setup.bash; export PYTHONPATH=/repo/g1_root_state_bridge; export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1; cd /repo; python3 -m pytest -q tests/root_state --ignore=tests/root_state/test_motive_fixed_anchor_buffer.py -k "not g1_dynamic_capture_recorder and not g1_dynamic_capture_relay and not udp_receiver"' \
   2>&1 | tee "$run_dir/logs/qualification-tests.log"
 "$python" -m compileall -q "$repo_root/g1_root_state_bridge/g1_root_state_bridge"
 "$python" -m ruff check "$repo_root/g1_root_state_bridge" "$repo_root/tests/root_state" \

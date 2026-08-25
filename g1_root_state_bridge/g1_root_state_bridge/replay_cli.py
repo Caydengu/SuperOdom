@@ -13,11 +13,13 @@ from g1_root_state_bridge.clock_sync import fit_affine_lower_envelope_clock
 from g1_root_state_bridge.dynamic_capture_io import iter_recorded_datagrams
 from g1_root_state_bridge.kiss_registration import KissRegistration
 from g1_root_state_bridge.live_pipeline import (
+    ImuSampleGap,
     LiveLocalizationConfig,
     LiveLocalizationError,
     SelectedLocalizationPipeline,
     joint_sample_from_dynamic_packet,
 )
+from g1_root_state_bridge.protocol import REQUIRED_ROOT_FUSION_FLAGS, RootStateHealth
 
 
 def _quantiles(values: np.ndarray) -> dict[str, float]:
@@ -55,8 +57,31 @@ def run_replay(args: argparse.Namespace) -> dict[str, object]:
     points = np.asarray(archive["points_xyz_m"], dtype=np.float32)
     point_time = np.asarray(archive["point_relative_time_s"], dtype=np.float32)
     offsets = np.asarray(archive["scan_offsets"], dtype=np.int64)
-    scan_time_ns = np.asarray(archive["source_time_ns"], dtype=np.int64)
-    imu_time_ns = np.asarray(archive["imu_source_time_ns"], dtype=np.int64)
+    scan_source_time_ns = np.asarray(archive["source_time_ns"], dtype=np.int64)
+    scan_receipt_time_ns = np.asarray(archive["receipt_time_ns"], dtype=np.int64)
+    imu_source_time_ns = np.asarray(archive["imu_source_time_ns"], dtype=np.int64)
+    imu_receipt_time_ns = np.asarray(archive["imu_receipt_time_ns"], dtype=np.int64)
+    if scan_source_time_ns.shape != scan_receipt_time_ns.shape:
+        raise ValueError("scan source and receipt timestamp arrays must have equal shape")
+    if imu_source_time_ns.shape != imu_receipt_time_ns.shape:
+        raise ValueError("IMU source and receipt timestamp arrays must have equal shape")
+    # Match the live node exactly: the Livox IMU is the clock authority for both
+    # IMU samples and PointCloud2 scan headers.  G1 source time can have a large
+    # constant offset from host realtime, so using raw headers against mapped
+    # LowState timestamps makes an otherwise valid capture look non-overlapping.
+    imu_clock = fit_affine_lower_envelope_clock(
+        imu_source_time_ns,
+        imu_receipt_time_ns,
+        lower_quantile=0.01,
+    )
+    scan_time_ns = np.asarray(
+        [imu_clock.map_time_ns(value) for value in scan_source_time_ns],
+        dtype=np.int64,
+    )
+    imu_time_ns = np.asarray(
+        [imu_clock.map_time_ns(value) for value in imu_source_time_ns],
+        dtype=np.int64,
+    )
     imu_angular = np.asarray(archive["imu_angular_velocity_radps"], dtype=np.float64)
     if args.maximum_scans is not None:
         scan_time_ns = scan_time_ns[: args.maximum_scans]
@@ -85,7 +110,11 @@ def run_replay(args: argparse.Namespace) -> dict[str, object]:
             minimum_range_m=args.minimum_range_m,
             maximum_range_m=args.maximum_range_m,
         ),
-        LiveLocalizationConfig(gyro_bias_radps=tuple(args.gyro_bias_radps)),
+        LiveLocalizationConfig(
+            gyro_bias_radps=tuple(args.gyro_bias_radps),
+            maximum_imu_gap_ns=round(args.maximum_imu_gap_ms * 1e6),
+            maximum_imu_bridge_gap_ns=round(args.maximum_imu_bridge_gap_ms * 1e6),
+        ),
     )
     lowstate_iterator = iter(iter_recorded_datagrams(args.lowstate))
     pending_lowstate = _next_or_none(lowstate_iterator)
@@ -96,12 +125,15 @@ def run_replay(args: argparse.Namespace) -> dict[str, object]:
     positions: list[tuple[float, float, float]] = []
     quaternions_wxyz: list[tuple[float, float, float, float]] = []
     output_time_ns: list[int] = []
+    healthy_output_time_ns: list[int] = []
     health_flags: list[int] = []
     pose_age_ms: list[float] = []
     runtime_rows: list[dict[str, float]] = []
     adaptive_threshold: list[float] = []
     deskew_excursion: list[float] = []
     dropped: dict[str, int] = {}
+    imu_gap_bridges = 0
+    imu_gap_restarts = 0
     wall_start_ns = time.perf_counter_ns()
     with treatments_path.open("x", encoding="utf-8") as treatments:
         treatments.write(
@@ -125,12 +157,29 @@ def run_replay(args: argparse.Namespace) -> dict[str, object]:
             scan_end_ns = int(scan_start_ns + round(float(np.max(relative)) * 1e9))
             while imu_index < imu_time_ns.size and int(imu_time_ns[imu_index]) <= scan_end_ns:
                 try:
-                    pipeline.append_imu(int(imu_time_ns[imu_index]), imu_angular[imu_index])
+                    bridged = pipeline.append_imu(
+                        int(imu_time_ns[imu_index]), imu_angular[imu_index]
+                    )
+                    imu_gap_bridges += int(bridged > 0)
+                except ImuSampleGap:
+                    pipeline.restart_imu_after_gap(
+                        int(imu_time_ns[imu_index]), imu_angular[imu_index]
+                    )
+                    imu_gap_restarts += 1
                 except LiveLocalizationError as error:
                     dropped[str(error)] = dropped.get(str(error), 0) + 1
                 imu_index += 1
             if imu_index < imu_time_ns.size:
-                pipeline.append_imu(int(imu_time_ns[imu_index]), imu_angular[imu_index])
+                try:
+                    bridged = pipeline.append_imu(
+                        int(imu_time_ns[imu_index]), imu_angular[imu_index]
+                    )
+                    imu_gap_bridges += int(bridged > 0)
+                except ImuSampleGap:
+                    pipeline.restart_imu_after_gap(
+                        int(imu_time_ns[imu_index]), imu_angular[imu_index]
+                    )
+                    imu_gap_restarts += 1
                 imu_index += 1
             while (
                 pending_lowstate is not None
@@ -177,6 +226,11 @@ def run_replay(args: argparse.Namespace) -> dict[str, object]:
             quaternions_wxyz.append(packet.quaternion_wxyz)
             output_time_ns.append(packet.estimate_time_ns)
             health_flags.append(int(packet.health_flags))
+            packet_healthy = (
+                packet.health_flags & REQUIRED_ROOT_FUSION_FLAGS
+            ) == REQUIRED_ROOT_FUSION_FLAGS
+            if packet_healthy:
+                healthy_output_time_ns.append(packet.estimate_time_ns)
             pose_age_ms.append((packet.publish_time_ns - packet.estimate_time_ns) * 1e-6)
             runtime_rows.append(output.stage_runtime_ms)
             adaptive_threshold.append(output.adaptive_threshold)
@@ -196,12 +250,22 @@ def run_replay(args: argparse.Namespace) -> dict[str, object]:
                         "child_frame_id": "pelvis_navigation_yaw",
                         "position_xyz_m": list(packet.position),
                         "quaternion_xyzw": [x, y, z, w],
-                        "orientation_fusion_healthy": True,
-                        "orientation_fusion_reason": "livox_navigation_heading",
+                        "orientation_fusion_healthy": bool(
+                            packet.health_flags & RootStateHealth.HEADING_VALID
+                        ),
+                        "orientation_fusion_reason": (
+                            "livox_navigation_heading"
+                            if packet_healthy
+                            else "bounded_livox_imu_gap_bridge"
+                        ),
                         "yaw_innovation_rad": 0.0,
                         "adaptive_threshold": output.adaptive_threshold,
                         "runtime_ms": output.stage_runtime_ms["total"],
-                        "deskew_valid": True,
+                        "deskew_valid": bool(
+                            packet.health_flags
+                            & RootStateHealth.INERTIAL_DESKEW_VALID
+                        ),
+                        "bridged_imu_gap_ns": output.bridged_imu_gap_ns,
                     },
                     sort_keys=True,
                     separators=(",", ":"),
@@ -231,6 +295,17 @@ def run_replay(args: argparse.Namespace) -> dict[str, object]:
             & (np.asarray(output_time_ns, dtype=np.int64) <= lowstate_last_ns)
         )
     )
+    healthy_times = np.asarray(healthy_output_time_ns, dtype=np.int64)
+    healthy_overlap_outputs = int(
+        np.count_nonzero(
+            (healthy_times >= lowstate_first_ns) & (healthy_times <= lowstate_last_ns)
+        )
+    )
+    maximum_healthy_output_gap_s = (
+        float(np.max(np.diff(healthy_times))) * 1e-9
+        if healthy_times.size >= 2
+        else float("inf")
+    )
     metrics: dict[str, object] = {
         "schema": "g1_kiss_live_localization_replay_v1",
         "scans_requested": int(scan_time_ns.size),
@@ -239,6 +314,12 @@ def run_replay(args: argparse.Namespace) -> dict[str, object]:
         "input_overlap_scans": overlap_scans,
         "input_overlap_outputs": overlap_outputs,
         "input_overlap_availability": overlap_outputs / overlap_scans if overlap_scans else 0.0,
+        "healthy_outputs": len(healthy_output_time_ns),
+        "healthy_input_overlap_outputs": healthy_overlap_outputs,
+        "healthy_input_overlap_availability": (
+            healthy_overlap_outputs / overlap_scans if overlap_scans else 0.0
+        ),
+        "maximum_healthy_output_gap_s": maximum_healthy_output_gap_s,
         "capture_boundary_scans_without_lowstate_coverage": int(scan_time_ns.size - overlap_scans),
         "dropped": dropped,
         "recorded_duration_s": duration_s,
@@ -254,8 +335,18 @@ def run_replay(args: argparse.Namespace) -> dict[str, object]:
             "residual_p95_ns": lowstate_clock.residual_p95_ns,
             "lower_envelope_residual_ns": lowstate_clock.lower_envelope_residual_ns,
         },
+        "imu_clock": {
+            "method": "affine_lower_envelope_q01",
+            "slope": imu_clock.slope,
+            "residual_p95_ns": imu_clock.residual_p95_ns,
+            "lower_envelope_residual_ns": imu_clock.lower_envelope_residual_ns,
+        },
         "source_epoch": pipeline._source_epoch,
         "treatment": args.treatment_name,
+        "maximum_imu_gap_ms": args.maximum_imu_gap_ms,
+        "maximum_imu_bridge_gap_ms": args.maximum_imu_bridge_gap_ms,
+        "imu_gap_bridges": imu_gap_bridges,
+        "imu_gap_restarts": imu_gap_restarts,
     }
     np.savez_compressed(
         tracks_path,
@@ -282,6 +373,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--voxel-size-m", type=float, default=0.15)
     parser.add_argument("--minimum-range-m", type=float, default=0.5)
     parser.add_argument("--maximum-range-m", type=float, default=15.0)
+    parser.add_argument("--maximum-imu-gap-ms", type=float, default=25.0)
+    parser.add_argument("--maximum-imu-bridge-gap-ms", type=float, default=40.0)
     parser.add_argument(
         "--synthetic-input-delivery-delay-ns",
         type=int,

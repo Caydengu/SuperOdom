@@ -61,6 +61,7 @@ fi
 }
 
 workspace_root="$(realpath "$workspace_root")"
+export G1_LOCALIZATION_IMAGE="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.3-imu-gap-bridge-humble}"
 localization_repo="$workspace_root/.worktrees/superodom-g1-4123-final-live-localization"
 robot_vlm_repo="$workspace_root/.worktrees/robot-vlm-g1-layered-localization-ui-live"
 research_run="$workspace_root/research/perceptive-humanoid-diffusion/runs/2026-08-24_g1-4123-robot-vlm-live-localization"
