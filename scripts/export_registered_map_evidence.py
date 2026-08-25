@@ -26,6 +26,7 @@ def main() -> int:
         "--topic",
         default="/g1/localization/cloud_registered",
     )
+    parser.add_argument("--expected-frame", default="kiss_local")
     parser.add_argument("--maximum-points-per-cloud", type=int, default=5_000)
     args = parser.parse_args()
     if args.output.exists():
@@ -54,9 +55,10 @@ def main() -> int:
         if topic != args.topic:
             continue
         message = deserialize_message(serialized, PointCloud2)
-        if str(message.header.frame_id) != "kiss_local":
+        if str(message.header.frame_id) != args.expected_frame:
             raise ValueError(
-                f"registered cloud frame must be kiss_local, got {message.header.frame_id!r}"
+                "registered cloud frame must be "
+                f"{args.expected_frame!r}, got {message.header.frame_id!r}"
             )
         cloud = decode_xyz_pointcloud2(
             message,
@@ -86,7 +88,7 @@ def main() -> int:
                     "schema": "g1_registered_map_evidence_archive_v1",
                     "bag": str(args.bag),
                     "topic": args.topic,
-                    "frame_id": "kiss_local",
+                    "frame_id": args.expected_frame,
                     "maximum_points_per_cloud": args.maximum_points_per_cloud,
                     "time_contract": "ROS header source time retained separately from bag receipt time",
                 },

@@ -104,6 +104,16 @@ def test_heading_update_preserves_current_map_position(tmp_path: Path) -> None:
         + attempt.packet.map_T_local[:3, 3]
     )[:2]
     np.testing.assert_allclose(new_position, old_position, atol=1e-6)
+    assert np.asarray(attempt.report["candidate_map_T_local"]).shape == (4, 4)
+    np.testing.assert_allclose(
+        attempt.packet.map_T_local,
+        np.asarray(attempt.report["applied_map_T_local"]),
+    )
+    np.testing.assert_allclose(
+        attempt.report["applied_map_T_local"],
+        attempt.packet.map_T_local,
+        atol=1e-6,
+    )
 
 
 def test_global_localization_configuration_preserves_frozen_yaw_grid() -> None:

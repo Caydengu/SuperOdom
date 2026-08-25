@@ -131,6 +131,9 @@ def run_replay(args: argparse.Namespace) -> dict[str, object]:
     runtime_rows: list[dict[str, float]] = []
     adaptive_threshold: list[float] = []
     deskew_excursion: list[float] = []
+    registered_points: list[np.ndarray] = []
+    registered_offsets = [0]
+    registered_time_ns: list[int] = []
     dropped: dict[str, int] = {}
     imu_gap_bridges = 0
     imu_gap_restarts = 0
@@ -235,6 +238,20 @@ def run_replay(args: argparse.Namespace) -> dict[str, object]:
             runtime_rows.append(output.stage_runtime_ms)
             adaptive_threshold.append(output.adaptive_threshold)
             deskew_excursion.append(output.deskew_angular_excursion_deg)
+            if args.registered_clouds_output is not None:
+                cloud = output.registered_points_local_xyz_m
+                if cloud.shape[0] > args.maximum_registered_points_per_cloud:
+                    indices = np.linspace(
+                        0,
+                        cloud.shape[0] - 1,
+                        args.maximum_registered_points_per_cloud,
+                        dtype=np.int64,
+                    )
+                    cloud = cloud[indices]
+                cloud = np.asarray(cloud, dtype=np.float32)
+                registered_points.append(cloud)
+                registered_offsets.append(registered_offsets[-1] + cloud.shape[0])
+                registered_time_ns.append(packet.estimate_time_ns)
             w, x, y, z = packet.quaternion_wxyz
             treatments.write(
                 json.dumps(
@@ -359,6 +376,29 @@ def run_replay(args: argparse.Namespace) -> dict[str, object]:
         deskew_angular_excursion_deg=np.asarray(deskew_excursion, dtype=np.float64),
         metadata_json=np.asarray(json.dumps(metrics, sort_keys=True)),
     )
+    if args.registered_clouds_output is not None:
+        registered_output = args.registered_clouds_output.resolve()
+        if registered_output.exists():
+            raise FileExistsError(f"refusing to overwrite {registered_output}")
+        registered_output.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            registered_output,
+            points_xyz_m=np.concatenate(registered_points, axis=0),
+            cloud_offsets=np.asarray(registered_offsets, dtype=np.int64),
+            source_time_ns=np.asarray(registered_time_ns, dtype=np.int64),
+            receipt_time_ns=np.asarray(registered_time_ns, dtype=np.int64),
+            frame_id=np.full(len(registered_time_ns), "kiss_local"),
+            metadata_json=np.asarray(
+                json.dumps(
+                    {
+                        "schema": "g1_registered_map_evidence_archive_v1",
+                        "source": "production_offline_replay",
+                        "maximum_points_per_cloud": args.maximum_registered_points_per_cloud,
+                    },
+                    sort_keys=True,
+                )
+            ),
+        )
     metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return metrics
 
@@ -382,6 +422,8 @@ def parse_args() -> argparse.Namespace:
         help="added before measured processing time when constructing replay publish time",
     )
     parser.add_argument("--maximum-scans", type=int)
+    parser.add_argument("--registered-clouds-output", type=Path)
+    parser.add_argument("--maximum-registered-points-per-cloud", type=int, default=5_000)
     return parser.parse_args()
 
 

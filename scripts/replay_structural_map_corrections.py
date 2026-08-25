@@ -19,17 +19,32 @@ from g1_root_state_bridge.structural_map_localization import (
     TimedLocalPose,
     TimedRegisteredCloud,
 )
+from g1_root_state_bridge.ui_initialization import load_ui_map_initialization
 
 
-def _load_odometry(path: Path, topic: str) -> list[dict[str, object]]:
+def _load_odometry(
+    path: Path, topic: str, treatment: str | None
+) -> list[dict[str, object]]:
     rows = []
     with path.open(encoding="utf-8") as stream:
         for line in stream:
             row = json.loads(line)
-            if row.get("kind") == "odometry" and row.get("topic") == topic:
+            is_odometry = row.get("kind") == "odometry" and row.get("topic") == topic
+            is_treatment = row.get("kind") == "pose" and row.get("treatment") == treatment
+            if is_odometry:
                 if row.get("frame_id") != "kiss_local":
                     raise ValueError("odometry frame must be kiss_local")
                 rows.append(row)
+            elif is_treatment:
+                rows.append(
+                    {
+                        **row,
+                        "source_time_ns": int(
+                            row.get("source_time_ns", row["event_realtime_ns"])
+                        ),
+                        "frame_id": "kiss_local",
+                    }
+                )
     if len(rows) < 3:
         raise ValueError(f"missing odometry topic {topic!r}")
     time_ns = np.asarray([row["source_time_ns"] for row in rows], dtype=np.int64)
@@ -59,7 +74,13 @@ def main() -> int:
     parser.add_argument("--registered-clouds", type=Path, required=True)
     parser.add_argument("--odometry", type=Path, required=True)
     parser.add_argument("--odometry-topic", default="/g1/localization/pelvis_odom")
+    parser.add_argument("--odometry-treatment")
     parser.add_argument("--local-source-epoch", type=int, required=True)
+    parser.add_argument(
+        "--initialization-receipt",
+        type=Path,
+        help="accepted Gio UI/headless bounded-Snap receipt; skips global search",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--packets-output", type=Path, required=True)
     args = parser.parse_args()
@@ -75,8 +96,20 @@ def main() -> int:
         config=config,
     )
     engine.bind_local_epoch(args.local_source_epoch)
+    initialization = None
+    if args.initialization_receipt is not None:
+        initialization = load_ui_map_initialization(
+            args.initialization_receipt,
+            expected_structural_map_sha256=engine.map_digest.hex(),
+            minimum_fitness=config.minimum_inlier_fraction,
+            maximum_rmse_m=config.maximum_rmse_m,
+            minimum_eigenvalue=config.minimum_observability_eigenvalue,
+            maximum_condition_number=config.maximum_observability_condition_number,
+        )
     buffer = RegisteredMapEvidenceBuffer(maximum_history_sec=15.0)
-    odometry = _load_odometry(args.odometry, args.odometry_topic)
+    odometry = _load_odometry(
+        args.odometry, args.odometry_topic, args.odometry_treatment
+    )
     odom_index = 0
     attempts: list[dict[str, object]] = []
     packets: list[dict[str, object]] = []
@@ -106,6 +139,12 @@ def main() -> int:
                 points[offsets[index] : offsets[index + 1]],
             )
         )
+        if (
+            engine.rotation is None
+            and initialization is not None
+            and int(evidence_ns) < initialization.evidence_time_ns
+        ):
+            continue
         if engine.rotation is None:
             window_sec = config.global_window_sec
         else:
@@ -126,7 +165,20 @@ def main() -> int:
                 window_sec=window_sec,
                 config=config,
             )
-            if engine.rotation is None:
+            if engine.rotation is None and initialization is not None:
+                attempt = engine.initialize_from_ui(
+                    map_T_local=initialization.map_T_local,
+                    fitness=initialization.fitness,
+                    rmse_m=initialization.rmse_m,
+                    min_eig=initialization.min_eig,
+                    cond_number=initialization.cond_number,
+                    reference_time_ns=initialization.reference_time_ns,
+                    evidence_time_ns=initialization.evidence_time_ns,
+                    # Offline replay preserves the evidence ordering without
+                    # pretending wall-clock latency from another session.
+                    application_time_ns=initialization.evidence_time_ns + 1,
+                )
+            elif engine.rotation is None:
                 attempt = engine.initialize(
                     query,
                     reference_time_ns=int(audit["start_source_time_ns"]),
@@ -202,6 +254,14 @@ def main() -> int:
         "map_path": str(args.map),
         "map_key": args.map_key,
         "map_digest": engine.map_digest.hex(),
+        "initialization_mode": (
+            "ui_pin_locked" if initialization is not None else "automatic_global_search"
+        ),
+        "initialization_receipt": (
+            None
+            if args.initialization_receipt is None
+            else str(args.initialization_receipt)
+        ),
         "local_source_epoch": args.local_source_epoch,
         "attempt_count": len(attempts),
         "accepted_count": len(packets),

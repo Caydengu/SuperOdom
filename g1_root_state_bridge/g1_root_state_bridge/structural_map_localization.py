@@ -755,6 +755,16 @@ class AutomaticMapCorrectionEngine:
             for key, value in candidate.items()
             if key not in {"rotation", "translation_m"}
         }
+        # Preserve the counterfactual full-SE(2) proposal for offline evaluation.
+        # The production packet below continues to carry the position-preserving
+        # heading-only transform; these diagnostic fields do not change the wire
+        # contract or the accepted online state.
+        report["candidate_map_T_local"] = map_transform_from_row_se2(
+            candidate_rotation, candidate_translation
+        ).tolist()
+        report["applied_map_T_local"] = map_transform_from_row_se2(
+            self.rotation, self.translation_m
+        ).tolist()
         return MapCorrectionAttempt(
             kind="heading_only_tracking",
             accepted=packet is not None,
