@@ -40,6 +40,9 @@ Options:
   --map-correction-port PORT   default: 5577
   --ui-port PORT               default: 8082
   --initialization-timeout-sec N default: 300
+  --map-voxel-m M              initial cloud voxel size; default: 0.05
+  --snap-src-points N          initial ICP source cap; 0 uses all retained points
+  --initial-pose-xyyaw X Y R   supplied map pose; otherwise use Gio's UI
   --dry-run
 EOF
 }
@@ -78,6 +81,9 @@ map_key=map_xy_structural_2cm
 map_correction_port=5577
 ui_port=8082
 initialization_timeout_sec=300
+map_voxel_m=0.05
+snap_src_points=40000
+initial_pose_xyyaw=()
 dry_run=false
 
 while (( $# )); do
@@ -112,6 +118,11 @@ while (( $# )); do
     --map-correction-port) map_correction_port=$2; shift 2 ;;
     --ui-port) ui_port=$2; shift 2 ;;
     --initialization-timeout-sec) initialization_timeout_sec=$2; shift 2 ;;
+    --map-voxel-m) map_voxel_m=$2; shift 2 ;;
+    --snap-src-points) snap_src_points=$2; shift 2 ;;
+    --initial-pose-xyyaw)
+      (( $# >= 4 )) || { echo "--initial-pose-xyyaw requires X Y YAW_RAD" >&2; exit 2; }
+      initial_pose_xyyaw=("$2" "$3" "$4"); shift 4 ;;
     --dry-run) dry_run=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage; exit 2 ;;
@@ -138,6 +149,12 @@ done
 [[ "$ui_port" =~ ^[0-9]+$ ]] && (( 10#$ui_port > 0 && 10#$ui_port <= 65535 )) || { echo "invalid UI port" >&2; exit 2; }
 [[ "$root_state_port" != "$map_correction_port" && "$map_correction_port" != "$live_lowstate_port" && "$map_correction_port" != "$record_lowstate_port" ]] || { echo "all localization and LowState ports must differ" >&2; exit 2; }
 [[ "$initialization_timeout_sec" =~ ^[0-9]+$ ]] && (( 10#$initialization_timeout_sec >= 30 && 10#$initialization_timeout_sec <= 900 )) || { echo "initialization timeout must be 30..900 seconds" >&2; exit 2; }
+[[ "$map_voxel_m" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "invalid map voxel size" >&2; exit 2; }
+python3 -c 'import sys; assert float(sys.argv[1]) > 0.0' "$map_voxel_m" 2>/dev/null || { echo "map voxel size must be positive" >&2; exit 2; }
+[[ "$snap_src_points" =~ ^[0-9]+$ ]] || { echo "invalid Snap source point cap" >&2; exit 2; }
+for value in "${initial_pose_xyyaw[@]}"; do
+  python3 -c 'import math,sys; assert math.isfinite(float(sys.argv[1]))' "$value" 2>/dev/null || { echo "initial pose values must be finite" >&2; exit 2; }
+done
 [[ "$map_key" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid map key" >&2; exit 2; }
 for value in "$network_interface" "$robot_dds_interface" "$robot_user" "$rigid_body_name"; do
   [[ "$value" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "unsafe identifier: $value" >&2; exit 2; }
@@ -274,6 +291,9 @@ map_artifact_sha256=$map_artifact_sha256
 motive_map_transform=$motive_map_transform
 map_correction_endpoint=tcp://127.0.0.1:$map_correction_port
 viser_url=http://localhost:$ui_port
+map_voxel_m=$map_voxel_m
+snap_src_points=$snap_src_points
+initial_pose_xyyaw=${initial_pose_xyyaw[*]:-ui}
 command_capability=structurally_unavailable
 EOF
   exit 0
@@ -554,7 +574,7 @@ if [[ "$integrated_robot_vlm" == true ]]; then
     --expected-surface-sha256 "${surface_sha256,,}" \
     >"$run_dir/logs/map_stack.log" 2>&1 &
   map_pid=$!
-  "$robot_vlm_repo/deploy/g1/localize/run_live_humble.sh" \
+  ui_command=("$robot_vlm_repo/deploy/g1/localize/run_live_humble.sh" \
     --network-interface "$network_interface" \
     --glb "$glb" \
     --glb-sha256 "${glb_sha256,,}" \
@@ -565,6 +585,12 @@ if [[ "$integrated_robot_vlm" == true ]]; then
     --port "$ui_port" \
     --duration-sec "$live_duration" \
     --ros-domain-id "$ros_domain_id" \
+    --map-voxel-m "$map_voxel_m" \
+    --snap-src-points "$snap_src_points")
+  if (( ${#initial_pose_xyyaw[@]} )); then
+    ui_command+=(--initial-pose-xyyaw "${initial_pose_xyyaw[@]}")
+  fi
+  "${ui_command[@]}" \
     >"$run_dir/logs/ui.log" 2>&1 &
   ui_pid=$!
   sleep 3
@@ -578,13 +604,22 @@ if [[ "$integrated_robot_vlm" == true ]]; then
     echo "Gio UI exited during startup; inspect $run_dir/logs/ui.log" >&2
     exit 5
   fi
-  cat <<EOF
+  if (( ${#initial_pose_xyyaw[@]} )); then
+    cat <<EOF
+LOCAL ODOMETRY READY. Keep G1-4123 stationary.
+The supplied map pose (${initial_pose_xyyaw[*]}) will run bounded ICP after the
+registered scan window is complete. The receipt gates must pass before this
+launcher continues.
+EOF
+  else
+    cat <<EOF
 LOCAL ODOMETRY READY. Keep G1-4123 stationary.
 Open http://localhost:$ui_port, choose "Set initial pose (2 clicks)", then click:
   1) the G1 position on the exact 2026-08-24 Polycam mesh
   2) a point in the direction the G1 faces
 The pin-locked Snap must pass the receipt gates before this launcher continues.
 EOF
+  fi
   if ! docker run --rm --user "$(id -u):$(id -g)" \
       --network host \
       --cap-drop ALL \

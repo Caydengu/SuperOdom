@@ -17,6 +17,9 @@ Options:
   --motive-map-transform PATH    accepted calibration JSON
   --without-motive-ground-truth run deployment stack without Motive evaluation
   --workspace-root PATH          default: /move/u/caydengu/cayden
+  --map-voxel-m M                initial cloud voxel size; default: 0.05
+  --snap-src-points N            initial ICP source cap; 0 uses all retained points
+  --initial-pose-xyyaw X Y R     supplied map pose; otherwise use Gio's UI
   --dry-run
 EOF
 }
@@ -27,6 +30,9 @@ duration_sec=""
 workspace_root=/move/u/caydengu/cayden
 motive_map_transform=""
 without_motive_ground_truth=false
+map_voxel_m=0.05
+snap_src_points=40000
+initial_pose_xyyaw=()
 dry_run=false
 
 while (( $# )); do
@@ -37,6 +43,11 @@ while (( $# )); do
     --motive-map-transform) motive_map_transform=$2; shift 2 ;;
     --without-motive-ground-truth) without_motive_ground_truth=true; shift ;;
     --workspace-root) workspace_root=$2; shift 2 ;;
+    --map-voxel-m) map_voxel_m=$2; shift 2 ;;
+    --snap-src-points) snap_src_points=$2; shift 2 ;;
+    --initial-pose-xyyaw)
+      (( $# >= 4 )) || { echo "--initial-pose-xyyaw requires X Y YAW_RAD" >&2; exit 2; }
+      initial_pose_xyyaw=("$2" "$3" "$4"); shift 4 ;;
     --dry-run) dry_run=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage; exit 2 ;;
@@ -59,6 +70,12 @@ fi
   echo "duration must be an integer from 30 through 600" >&2
   exit 2
 }
+[[ "$map_voxel_m" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "invalid map voxel size" >&2; exit 2; }
+python3 -c 'import sys; assert float(sys.argv[1]) > 0.0' "$map_voxel_m" 2>/dev/null || { echo "map voxel size must be positive" >&2; exit 2; }
+[[ "$snap_src_points" =~ ^[0-9]+$ ]] || { echo "invalid Snap source point cap" >&2; exit 2; }
+for value in "${initial_pose_xyyaw[@]}"; do
+  python3 -c 'import math,sys; assert math.isfinite(float(sys.argv[1]))' "$value" 2>/dev/null || { echo "initial pose values must be finite" >&2; exit 2; }
+done
 
 workspace_root="$(realpath "$workspace_root")"
 export G1_LOCALIZATION_IMAGE="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.3-imu-gap-bridge-humble}"
@@ -114,7 +131,12 @@ command=(
   --structural-map-sha256 3ce3af22d5eaf49d46878b8a9a07c86a7b0a132b6ba0c7ccb95487d7dc25863c
   --map-artifact "$map_artifact"
   --map-artifact-sha256 bce9bf243b9ba864e8c5a9ab41b5b18a6f45fe9fd0c835a37ec7cdcbd85c334c
+  --map-voxel-m "$map_voxel_m"
+  --snap-src-points "$snap_src_points"
 )
+if (( ${#initial_pose_xyyaw[@]} )); then
+  command+=(--initial-pose-xyyaw "${initial_pose_xyyaw[@]}")
+fi
 if [[ "$without_motive_ground_truth" == true ]]; then
   command+=(--motive-mode disabled)
 else
@@ -131,6 +153,8 @@ echo "  G1 interface: $network_interface"
 echo "  G1 Python: $robot_python"
 echo "  G1 fingerprint: ${robot_machine_id_sha256:0:12}..."
 echo "  Gio UI: http://localhost:8082"
+echo "  initial pose: ${initial_pose_xyyaw[*]:-Gio UI}"
+echo "  initialization points: voxel=${map_voxel_m}m cap=${snap_src_points}"
 if [[ "$without_motive_ground_truth" == true ]]; then
   echo "  Motive ground truth: disabled (absolute accuracy is not scored)"
 else
