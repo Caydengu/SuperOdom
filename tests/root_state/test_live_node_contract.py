@@ -202,6 +202,7 @@ def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> N
     source = (ROOT / "scripts/run_g1_kiss_live_verification.sh").read_text()
     assert "--motive-mode" in source
     assert '"$motive_mode" == required' in source
+    assert '"$motive_mode" == unmapped' in source
     assert '"$motive_mode" == disabled' in source
     assert "record_natnet_reference.py" in source
     assert "g1_dynamic_capture_recorder" in source
@@ -258,6 +259,7 @@ def test_fieldbay_wrapper_pins_the_complete_g1_4123_treatment() -> None:
     assert "bce9bf243b9ba864e8c5a9ab41b5b18a6f45fe9fd0c835a37ec7cdcbd85c334c" in source
     assert "--motive-map-transform" in source
     assert "--without-motive-ground-truth" in source
+    assert "--record-unmapped-motive" in source
     assert "rt/lowcmd" not in source
     assert "run_g1_amo_operator.sh" not in source
 

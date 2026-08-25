@@ -15,6 +15,7 @@ Options:
   --capture-class CLASS          stationary|amo-walk|amo-stress (default: stationary)
   --duration-sec N               default: 60 stationary, 120 otherwise
   --motive-map-transform PATH    accepted calibration JSON
+  --record-unmapped-motive       record ID 42 but do not score absolute map accuracy
   --without-motive-ground-truth run deployment stack without Motive evaluation
   --workspace-root PATH          default: /move/u/caydengu/cayden
   --map-voxel-m M                initial cloud voxel size; default: 0.05
@@ -29,7 +30,7 @@ capture_class=stationary
 duration_sec=""
 workspace_root=/move/u/caydengu/cayden
 motive_map_transform=""
-without_motive_ground_truth=false
+motive_mode=required
 map_voxel_m=0.05
 snap_src_points=40000
 initial_pose_xyyaw=()
@@ -41,7 +42,8 @@ while (( $# )); do
     --capture-class) capture_class=$2; shift 2 ;;
     --duration-sec) duration_sec=$2; shift 2 ;;
     --motive-map-transform) motive_map_transform=$2; shift 2 ;;
-    --without-motive-ground-truth) without_motive_ground_truth=true; shift ;;
+    --record-unmapped-motive) motive_mode=unmapped; shift ;;
+    --without-motive-ground-truth) motive_mode=disabled; shift ;;
     --workspace-root) workspace_root=$2; shift 2 ;;
     --map-voxel-m) map_voxel_m=$2; shift 2 ;;
     --snap-src-points) snap_src_points=$2; shift 2 ;;
@@ -88,14 +90,18 @@ glb="$map_audit/data/source/8_24_2026.glb"
 surface_cache="$research_run/data/maps/polycam-2026-08-24-surface-500k-seed24.npz"
 structural_map="$map_audit/data/maps/polycam-2026-08-24-structural.npz"
 map_artifact="$research_run/data/maps/src-fieldbay-2026-08-24-robot-vlm-map.npz"
-if [[ -z "$motive_map_transform" && "$without_motive_ground_truth" == false ]]; then
+if [[ -z "$motive_map_transform" && "$motive_mode" == required ]]; then
   motive_map_transform="$research_run/calibration/motive-polycam/motive-to-polycam.json"
+fi
+if [[ "$motive_mode" != required && -n "$motive_map_transform" ]]; then
+  echo "--motive-map-transform cannot be combined with an unmapped or disabled Motive mode" >&2
+  exit 2
 fi
 
 for path in "$localization_repo" "$robot_vlm_repo" "$glb" "$surface_cache" "$structural_map" "$map_artifact"; do
   [[ -e "$path" ]] || { echo "missing frozen input: $path" >&2; exit 2; }
 done
-if [[ "$without_motive_ground_truth" == false ]]; then
+if [[ "$motive_mode" == required ]]; then
   [[ -f "$motive_map_transform" ]] || {
     echo "missing accepted Motive-to-Polycam transform: $motive_map_transform" >&2
     echo "finish the independent transform calibration or pass --without-motive-ground-truth" >&2
@@ -137,10 +143,10 @@ command=(
 if (( ${#initial_pose_xyyaw[@]} )); then
   command+=(--initial-pose-xyyaw "${initial_pose_xyyaw[@]}")
 fi
-if [[ "$without_motive_ground_truth" == true ]]; then
-  command+=(--motive-mode disabled)
-else
+if [[ "$motive_mode" == required ]]; then
   command+=(--motive-mode required --motive-map-transform "$motive_map_transform")
+else
+  command+=(--motive-mode "$motive_mode")
 fi
 if [[ "$dry_run" == true ]]; then
   command+=(--dry-run)
@@ -155,8 +161,10 @@ echo "  G1 fingerprint: ${robot_machine_id_sha256:0:12}..."
 echo "  Gio UI: http://localhost:8082"
 echo "  initial pose: ${initial_pose_xyyaw[*]:-Gio UI}"
 echo "  initialization points: voxel=${map_voxel_m}m cap=${snap_src_points}"
-if [[ "$without_motive_ground_truth" == true ]]; then
+if [[ "$motive_mode" == disabled ]]; then
   echo "  Motive ground truth: disabled (absolute accuracy is not scored)"
+elif [[ "$motive_mode" == unmapped ]]; then
+  echo "  Motive ground truth: recording raw ID 42 (absolute accuracy is not scored)"
 else
   echo "  Motive ground truth: required"
 fi

@@ -36,6 +36,7 @@ Options:
   --map-artifact PATH          robot-vlm raster/occupancy/map observation NPZ
   --map-artifact-sha256 HEX    exact map observation artifact digest
   --motive-map-transform PATH  accepted independent Motive→Polycam evaluator JSON
+  --motive-mode MODE           required|unmapped|disabled; default: required
   --map-key KEY                default: map_xy_structural_2cm
   --map-correction-port PORT   default: 5577
   --ui-port PORT               default: 8082
@@ -135,7 +136,7 @@ done
   exit 2
 }
 [[ "$capture_class" == stationary || "$capture_class" == amo-walk || "$capture_class" == amo-stress ]] || { echo "invalid capture class" >&2; exit 2; }
-[[ "$motive_mode" == required || "$motive_mode" == disabled ]] || { echo "invalid Motive mode: $motive_mode" >&2; exit 2; }
+[[ "$motive_mode" == required || "$motive_mode" == unmapped || "$motive_mode" == disabled ]] || { echo "invalid Motive mode: $motive_mode" >&2; exit 2; }
 [[ "$rigid_body_id" =~ ^[0-9]+$ ]] || { echo "invalid rigid-body ID" >&2; exit 2; }
 [[ "$root_state_port" =~ ^[0-9]+$ ]] && (( 10#$root_state_port > 0 && 10#$root_state_port <= 65535 )) || {
   echo "invalid root-state port" >&2
@@ -247,7 +248,7 @@ route_to_robot="$(ip route get "$robot_host" | head -1)"
 [[ "$route_to_robot" != *" via "* ]] || { echo "robot route is not direct: $route_to_robot" >&2; exit 4; }
 [[ "$route_to_robot" == *" dev $network_interface "* ]] || { echo "wrong robot NIC: $route_to_robot" >&2; exit 4; }
 offboard_robot_address="$(awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' <<<"$route_to_robot")"
-if [[ "$motive_mode" == required ]]; then
+if [[ "$motive_mode" != disabled ]]; then
   motive_route="$(ip route get "$motive_server" | head -1)"
   motive_client_address="$(awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' <<<"$motive_route")"
 else
@@ -257,7 +258,7 @@ fi
   echo "could not resolve the G1 route" >&2
   exit 4
 }
-if [[ "$motive_mode" == required && -z "$motive_client_address" ]]; then
+if [[ "$motive_mode" != disabled && -z "$motive_client_address" ]]; then
   echo "could not resolve the Motive route" >&2
   exit 4
 fi
@@ -338,7 +339,7 @@ pathlib.Path(r"$run_dir/manifest.json").write_text(json.dumps({
   "container_image": "$image",
   "container_image_id": "$image_id",
   "motive_mode": "$motive_mode",
-  "motive_role": "$(if [[ "$motive_mode" == required ]]; then echo evaluator_only; else echo disabled; fi)",
+  "motive_role": "$(if [[ "$motive_mode" == required ]]; then echo evaluator_only_mapped; elif [[ "$motive_mode" == unmapped ]]; then echo evaluator_only_unmapped; else echo disabled; fi)",
   "command_capability": "structurally_unavailable",
   "actuation_publishers_created": 0,
   "integrated_robot_vlm": $integrated_python,
@@ -652,7 +653,7 @@ fi
 cyclonedds_uri="<CycloneDDS><Domain id=\"any\"><General><Interfaces><NetworkInterface name=\"$network_interface\" /></Interfaces></General></Domain></CycloneDDS>"
 
 motive_status=0
-if [[ "$motive_mode" == required ]]; then
+if [[ "$motive_mode" != disabled ]]; then
   python3 "$script_dir/record_natnet_reference.py" \
     --sdk-root "$run_dir/runtime" \
     --server-address "$motive_server" \
@@ -733,7 +734,7 @@ if [[ "$integrated_robot_vlm" == true ]]; then
 fi
 
 set +e
-if [[ "$motive_mode" == required ]]; then
+if [[ "$motive_mode" != disabled ]]; then
   wait "$motive_pid"; motive_status=$?
 fi
 wait "$lowstate_pid"; lowstate_status=$?

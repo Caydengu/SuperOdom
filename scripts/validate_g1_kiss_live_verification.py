@@ -87,12 +87,12 @@ def validate(run_dir: Path) -> dict[str, Any]:
     manifest = load_json(run_dir / "manifest.json")
     duration_sec = float(manifest["duration_sec"])
     motive_mode = str(manifest.get("motive_mode", "required"))
-    if motive_mode not in {"required", "disabled"}:
+    if motive_mode not in {"required", "unmapped", "disabled"}:
         raise ValueError(f"unsupported Motive mode: {motive_mode}")
     process_status = load_json(run_dir / "process_status.json")
     motive = (
         load_json(run_dir / "motive" / "summary.json")
-        if motive_mode == "required"
+        if motive_mode != "disabled"
         else {
             "status": "disabled",
             "role": "not an online localization input",
@@ -221,6 +221,8 @@ def validate(run_dir: Path) -> dict[str, Any]:
     }.get(str(manifest.get("capture_class", "stationary")), "live-localization capture")
     if motive_mode == "disabled":
         evidence_class += " without external ground truth"
+    elif motive_mode == "unmapped":
+        evidence_class += " with evaluator-only unmapped external ground truth"
     return {
         "schema": "g1_kiss_live_verification_validation_v1",
         "status": "pass" if passed else "fail",
@@ -228,7 +230,7 @@ def validate(run_dir: Path) -> dict[str, Any]:
         "checks": checks,
         "evidence_class": evidence_class if passed else "incomplete passive capture",
         "absolute_map_pose_accuracy_evaluated": False,
-        "external_ground_truth_recorded": motive_mode == "required",
+        "external_ground_truth_recorded": motive_mode != "disabled",
         "hardware_actuation_clearance": False,
     }
 
