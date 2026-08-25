@@ -559,6 +559,44 @@ local_source_epoch="$(python3 -c 'import json,sys; print(json.load(open(sys.argv
 calibration_digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["calibration_digest"])' "$run_dir/runtime/readiness-root-state.json")"
 
 if [[ "$integrated_robot_vlm" == true ]]; then
+  # Subscribe the actual robot-vlm consumer before either map publisher starts.
+  # The UI sequence-1 correction is intentionally one-shot PUB/SUB evidence;
+  # starting this observer after the separate readiness probe loses that anchor.
+  (
+    cd "$robot_vlm_repo"
+    export ROBOT_VLM_ROOT_STATE_ENDPOINT="tcp://127.0.0.1:$root_state_port"
+    export ROBOT_VLM_MAP_CORRECTION_ENDPOINT="tcp://127.0.0.1:$map_correction_port"
+    export ROBOT_VLM_STRUCTURAL_MAP_SHA256="${structural_map_sha256,,}"
+    export ROBOT_VLM_LOCALIZATION_CALIBRATION_SHA256="$calibration_digest"
+    export ROBOT_VLM_REQUIRE_INERTIAL_HEADING=1
+    export ROBOT_VLM_MAP_POSITION_POLICY=initialization_only
+    export ROBOT_VLM_MAP_ARTIFACT="$map_artifact"
+    PYTHONPATH=src "$robot_vlm_python" scripts/probe_real_backend_localization.py \
+      --map-artifact "$map_artifact" \
+      --expected-artifact-sha256 "${map_artifact_sha256,,}" \
+      --duration-sec "$duration_sec" \
+      --sample-hz 50 \
+      --wait-for-initialization-sec "$((10#$initialization_timeout_sec + 15))" \
+      --subscription-ready "$run_dir/runtime/robot-vlm-subscription-ready.json" \
+      --writer-lock "$run_dir/runtime/robot-vlm-observer.lock" \
+      --output "$run_dir/robot-vlm-real-backend.json" \
+      --trace "$run_dir/traces/robot-vlm-base-pose.jsonl"
+  ) >"$run_dir/logs/robot-vlm-real-backend.log" 2>&1 &
+  probe_pid=$!
+  for _ in $(seq 1 100); do
+    [[ -s "$run_dir/runtime/robot-vlm-subscription-ready.json" ]] && break
+    if ! kill -0 "$probe_pid" 2>/dev/null; then
+      mark_runtime_failed robot_vlm_subscription \
+        "robot-vlm observer exited before its subscriber-ready receipt"
+      exit 5
+    fi
+    sleep 0.1
+  done
+  if [[ ! -s "$run_dir/runtime/robot-vlm-subscription-ready.json" ]]; then
+    mark_runtime_failed robot_vlm_subscription \
+      "robot-vlm observer did not bind both localization subscribers within 10 seconds"
+    exit 5
+  fi
   initialization_receipt="$run_dir/runtime/ui-initialization.json"
   "$script_dir/run_g1_structural_map_shadow.sh" \
     --network-interface "$network_interface" \
@@ -711,27 +749,6 @@ docker run --rm --network host \
 bag_pid=$!
 
 probe_status=0
-if [[ "$integrated_robot_vlm" == true ]]; then
-  (
-    cd "$robot_vlm_repo"
-    export ROBOT_VLM_ROOT_STATE_ENDPOINT="tcp://127.0.0.1:$root_state_port"
-    export ROBOT_VLM_MAP_CORRECTION_ENDPOINT="tcp://127.0.0.1:$map_correction_port"
-    export ROBOT_VLM_STRUCTURAL_MAP_SHA256="${structural_map_sha256,,}"
-    export ROBOT_VLM_LOCALIZATION_CALIBRATION_SHA256="$calibration_digest"
-    export ROBOT_VLM_REQUIRE_INERTIAL_HEADING=1
-    export ROBOT_VLM_MAP_POSITION_POLICY=initialization_only
-    export ROBOT_VLM_MAP_ARTIFACT="$map_artifact"
-    PYTHONPATH=src "$robot_vlm_python" scripts/probe_real_backend_localization.py \
-      --map-artifact "$map_artifact" \
-      --expected-artifact-sha256 "${map_artifact_sha256,,}" \
-      --duration-sec "$duration_sec" \
-      --sample-hz 50 \
-      --writer-lock "$run_dir/runtime/robot-vlm-observer.lock" \
-      --output "$run_dir/robot-vlm-real-backend.json" \
-      --trace "$run_dir/traces/robot-vlm-base-pose.jsonl"
-  ) >"$run_dir/logs/robot-vlm-real-backend.log" 2>&1 &
-  probe_pid=$!
-fi
 
 set +e
 if [[ "$motive_mode" != disabled ]]; then
@@ -742,6 +759,37 @@ wait "$relay_pid"; relay_status=$?
 wait "$bag_pid"; bag_status=$?
 if [[ "$integrated_robot_vlm" == true ]]; then
   wait "$probe_pid"; probe_status=$?; probe_pid=""
+  if (( probe_status == 0 )); then
+    if ! python3 - \
+        "$run_dir/runtime/map-readiness.json" \
+        "$run_dir/robot-vlm-real-backend.json" \
+        "$run_dir/runtime/sequence1-consumer-binding.json" <<'PY'
+import json
+import pathlib
+import sys
+
+readiness = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+probe = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+expected = int(readiness["evidence_time_ns"])
+observed = probe.get("initial_map_evidence_realtime_ns")
+passed = readiness.get("sequence") == 1 and observed == expected
+receipt = {
+    "schema": "robot_vlm_sequence1_consumer_binding_v1",
+    "status": "pass" if passed else "fail",
+    "readiness_sequence": readiness.get("sequence"),
+    "expected_initial_map_evidence_ns": expected,
+    "consumer_initial_map_evidence_ns": observed,
+    "exact_sequence1_anchor": passed,
+}
+pathlib.Path(sys.argv[3]).write_text(
+    json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+)
+raise SystemExit(0 if passed else 1)
+PY
+    then
+      probe_status=6
+    fi
+  fi
   kill -TERM "$map_pid" "$ui_pid" "$live_pid" 2>/dev/null || true
   wait "$map_pid"; map_status=$?; map_pid=""
   wait "$ui_pid"; ui_status=$?; ui_pid=""
