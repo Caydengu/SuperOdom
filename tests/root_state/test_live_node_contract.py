@@ -196,6 +196,9 @@ def test_layered_qualification_runs_both_lanes_and_actual_robot_vlm_probe() -> N
 
 def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> None:
     source = (ROOT / "scripts/run_g1_kiss_live_verification.sh").read_text()
+    assert "--motive-mode" in source
+    assert '"$motive_mode" == required' in source
+    assert '"$motive_mode" == disabled' in source
     assert "record_natnet_reference.py" in source
     assert "g1_dynamic_capture_recorder" in source
     assert "/utlidar/cloud_livox_mid360" in source
@@ -227,6 +230,7 @@ def test_fieldbay_wrapper_pins_the_complete_g1_4123_treatment() -> None:
     assert "3ce3af22d5eaf49d46878b8a9a07c86a7b0a132b6ba0c7ccb95487d7dc25863c" in source
     assert "bce9bf243b9ba864e8c5a9ab41b5b18a6f45fe9fd0c835a37ec7cdcbd85c334c" in source
     assert "--motive-map-transform" in source
+    assert "--without-motive-ground-truth" in source
     assert "rt/lowcmd" not in source
     assert "run_g1_amo_operator.sh" not in source
 
@@ -237,6 +241,8 @@ def test_live_verification_validator_enforces_g1_4123_admission() -> None:
     assert "== 42" in source
     assert ">= 0.99" in source
     assert "availability >= 0.95" in source
+    assert 'without external ground truth' in source
+    assert '"absolute_map_pose_accuracy_evaluated": False' in source
     assert '"hardware_actuation_clearance": False' in source
 
 

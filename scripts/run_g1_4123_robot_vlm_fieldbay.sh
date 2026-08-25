@@ -7,7 +7,7 @@ Usage: run_g1_4123_robot_vlm_fieldbay.sh --run-dir PATH [options]
 
 Run the deployment-faithful, passive G1-4123 localization recorder with the
 frozen 2026-08-24 Field Bay Polycam map, Gio's two-click UI initialization,
-the actual robot-vlm RealBackend consumer, and Motive evaluator truth.
+the actual robot-vlm RealBackend consumer, and optional Motive evaluator truth.
 
 This wrapper never launches AMO and creates no robot command publisher.
 
@@ -15,6 +15,7 @@ Options:
   --capture-class CLASS          stationary|amo-walk|amo-stress (default: stationary)
   --duration-sec N               default: 60 stationary, 120 otherwise
   --motive-map-transform PATH    accepted calibration JSON
+  --without-motive-ground-truth run deployment stack without Motive evaluation
   --workspace-root PATH          default: /move/u/caydengu/cayden
   --dry-run
 EOF
@@ -25,6 +26,7 @@ capture_class=stationary
 duration_sec=""
 workspace_root=/move/u/caydengu/cayden
 motive_map_transform=""
+without_motive_ground_truth=false
 dry_run=false
 
 while (( $# )); do
@@ -33,6 +35,7 @@ while (( $# )); do
     --capture-class) capture_class=$2; shift 2 ;;
     --duration-sec) duration_sec=$2; shift 2 ;;
     --motive-map-transform) motive_map_transform=$2; shift 2 ;;
+    --without-motive-ground-truth) without_motive_ground_truth=true; shift ;;
     --workspace-root) workspace_root=$2; shift 2 ;;
     --dry-run) dry_run=true; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -67,18 +70,20 @@ glb="$map_audit/data/source/8_24_2026.glb"
 surface_cache="$research_run/data/maps/polycam-2026-08-24-surface-500k-seed24.npz"
 structural_map="$map_audit/data/maps/polycam-2026-08-24-structural.npz"
 map_artifact="$research_run/data/maps/src-fieldbay-2026-08-24-robot-vlm-map.npz"
-if [[ -z "$motive_map_transform" ]]; then
+if [[ -z "$motive_map_transform" && "$without_motive_ground_truth" == false ]]; then
   motive_map_transform="$research_run/calibration/motive-polycam/motive-to-polycam.json"
 fi
 
 for path in "$localization_repo" "$robot_vlm_repo" "$glb" "$surface_cache" "$structural_map" "$map_artifact"; do
   [[ -e "$path" ]] || { echo "missing frozen input: $path" >&2; exit 2; }
 done
-[[ -f "$motive_map_transform" ]] || {
-  echo "missing accepted Motive-to-Polycam transform: $motive_map_transform" >&2
-  echo "finish the independent transform calibration before live qualification" >&2
-  exit 2
-}
+if [[ "$without_motive_ground_truth" == false ]]; then
+  [[ -f "$motive_map_transform" ]] || {
+    echo "missing accepted Motive-to-Polycam transform: $motive_map_transform" >&2
+    echo "finish the independent transform calibration or pass --without-motive-ground-truth" >&2
+    exit 2
+  }
+fi
 
 robot_host=192.168.123.164
 route_to_robot="$(ip route get "$robot_host" | head -1)"
@@ -104,8 +109,12 @@ command=(
   --structural-map-sha256 3ce3af22d5eaf49d46878b8a9a07c86a7b0a132b6ba0c7ccb95487d7dc25863c
   --map-artifact "$map_artifact"
   --map-artifact-sha256 bce9bf243b9ba864e8c5a9ab41b5b18a6f45fe9fd0c835a37ec7cdcbd85c334c
-  --motive-map-transform "$motive_map_transform"
 )
+if [[ "$without_motive_ground_truth" == true ]]; then
+  command+=(--motive-mode disabled)
+else
+  command+=(--motive-mode required --motive-map-transform "$motive_map_transform")
+fi
 if [[ "$dry_run" == true ]]; then
   command+=(--dry-run)
 fi
@@ -115,5 +124,10 @@ echo "  class: $capture_class"
 echo "  duration: ${duration_sec}s"
 echo "  G1 interface: $network_interface"
 echo "  Gio UI: http://localhost:8082"
+if [[ "$without_motive_ground_truth" == true ]]; then
+  echo "  Motive ground truth: disabled (absolute accuracy is not scored)"
+else
+  echo "  Motive ground truth: required"
+fi
 echo "  command capability: structurally unavailable"
 exec "${command[@]}"

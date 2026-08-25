@@ -5,9 +5,10 @@ usage() {
   cat >&2 <<'EOF'
 Usage: run_g1_kiss_live_verification.sh --run-dir PATH --network-interface IFACE [options]
 
-Record a bounded, passive G1-4123 localization shadow with Motive evaluator
-truth, raw Livox LiDAR/IMU, raw LowState/pelvis IMU, and live localization
-outputs. The launcher creates no robot command publisher.
+Record a bounded G1-4123 localization run with raw Livox LiDAR/IMU, raw
+LowState/pelvis IMU, and live localization outputs. Motive may be required as
+independent evaluator truth or explicitly disabled; it is never an online
+localization input. The launcher creates no robot command publisher.
 
 Options:
   --duration-sec N             default: 120; range: 30..600
@@ -16,6 +17,7 @@ Options:
   --robot-user USER            default: unitree
   --robot-dds-interface IFACE  default: eth0
   --motive-server IP           default: 172.24.68.77
+  --motive-mode MODE           required|disabled; default: required
   --rigid-body-id ID           default: 42
   --rigid-body-name NAME       default: G1_PELVIS_F_4123
   --ros-domain-id ID           default: 0
@@ -50,6 +52,7 @@ robot_dds_interface=eth0
 robot_python=/home/unitree/miniforge3/envs/egonav-deploy/bin/python
 robot_localization_root=/home/unitree/geo-179/G1_localization
 motive_server=172.24.68.77
+motive_mode=required
 rigid_body_id=42
 rigid_body_name=G1_PELVIS_F_4123
 ros_domain_id=0
@@ -83,6 +86,7 @@ while (( $# )); do
     --robot-user) robot_user=$2; shift 2 ;;
     --robot-dds-interface) robot_dds_interface=$2; shift 2 ;;
     --motive-server) motive_server=$2; shift 2 ;;
+    --motive-mode) motive_mode=$2; shift 2 ;;
     --rigid-body-id) rigid_body_id=$2; shift 2 ;;
     --rigid-body-name) rigid_body_name=$2; shift 2 ;;
     --ros-domain-id) ros_domain_id=$2; shift 2 ;;
@@ -114,6 +118,7 @@ done
   exit 2
 }
 [[ "$capture_class" == stationary || "$capture_class" == amo-walk || "$capture_class" == amo-stress ]] || { echo "invalid capture class" >&2; exit 2; }
+[[ "$motive_mode" == required || "$motive_mode" == disabled ]] || { echo "invalid Motive mode: $motive_mode" >&2; exit 2; }
 [[ "$rigid_body_id" =~ ^[0-9]+$ ]] || { echo "invalid rigid-body ID" >&2; exit 2; }
 [[ "$root_state_port" =~ ^[0-9]+$ ]] && (( 10#$root_state_port > 0 && 10#$root_state_port <= 65535 )) || {
   echo "invalid root-state port" >&2
@@ -142,7 +147,11 @@ else
 fi
 export G1_LOCALIZATION_IMAGE="$image"
 if [[ "$integrated_robot_vlm" == true ]]; then
-  [[ -n "$robot_vlm_repo" && -n "$glb" && -n "$surface_cache" && -n "$structural_map" && -n "$map_artifact" && -n "$motive_map_transform" ]] || { echo "integrated robot-vlm mode requires all repo/map/evaluator paths" >&2; exit 2; }
+  [[ -n "$robot_vlm_repo" && -n "$glb" && -n "$surface_cache" && -n "$structural_map" && -n "$map_artifact" ]] || { echo "integrated robot-vlm mode requires all repo/map paths" >&2; exit 2; }
+  if [[ "$motive_mode" == required && -z "$motive_map_transform" ]]; then
+    echo "required Motive evaluation needs --motive-map-transform" >&2
+    exit 2
+  fi
   for digest in "$glb_sha256" "$surface_sha256" "$structural_map_sha256" "$map_artifact_sha256"; do
     [[ "$digest" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "integrated map digests must contain 64 hexadecimal characters" >&2; exit 2; }
   done
@@ -151,10 +160,16 @@ if [[ "$integrated_robot_vlm" == true ]]; then
   surface_cache="$(realpath "$surface_cache")"
   structural_map="$(realpath "$structural_map")"
   map_artifact="$(realpath "$map_artifact")"
-  motive_map_transform="$(realpath "$motive_map_transform")"
+  if [[ "$motive_mode" == required ]]; then
+    motive_map_transform="$(realpath "$motive_map_transform")"
+  fi
   [[ -x "$robot_vlm_repo/deploy/g1/localize/run_live_humble.sh" ]] || { echo "prepared Humble UI launcher is missing" >&2; exit 2; }
   [[ -f "$robot_vlm_repo/scripts/probe_real_backend_localization.py" ]] || { echo "real-backend localization probe is missing" >&2; exit 2; }
-  for path in "$glb" "$surface_cache" "$structural_map" "$map_artifact" "$motive_map_transform"; do [[ -f "$path" ]] || { echo "missing integrated input: $path" >&2; exit 2; }; done
+  for path in "$glb" "$surface_cache" "$structural_map" "$map_artifact"; do [[ -f "$path" ]] || { echo "missing integrated input: $path" >&2; exit 2; }; done
+  if [[ "$motive_mode" == required && ! -f "$motive_map_transform" ]]; then
+    echo "missing integrated Motive evaluator input: $motive_map_transform" >&2
+    exit 2
+  fi
   [[ "$(sha256sum "$glb" | awk '{print $1}')" == "${glb_sha256,,}" ]] || { echo "GLB digest mismatch" >&2; exit 4; }
   [[ "$(sha256sum "$structural_map" | awk '{print $1}')" == "${structural_map_sha256,,}" ]] || { echo "structural-map digest mismatch" >&2; exit 4; }
   [[ "$(sha256sum "$map_artifact" | awk '{print $1}')" == "${map_artifact_sha256,,}" ]] || { echo "robot-vlm map-artifact digest mismatch" >&2; exit 4; }
@@ -184,25 +199,35 @@ with np.load("/inputs/map-artifact.npz", allow_pickle=False) as value:
   [[ "${integrated_identity[0]}" == "${glb_sha256,,}" && "${integrated_identity[1]}" == "${surface_sha256,,}" ]] || { echo "surface target identity mismatch" >&2; exit 4; }
   [[ "${integrated_identity[2]}" == "$map_key" ]] || { echo "structural map key mismatch" >&2; exit 4; }
   [[ "${integrated_identity[3]}" == "${glb_sha256,,}" && "${integrated_identity[4]}" == "${surface_sha256,,}" && "${integrated_identity[5]}" == "${structural_map_sha256,,}" ]] || { echo "robot-vlm map artifact identity mismatch" >&2; exit 4; }
-  python3 "$script_dir/validate_motive_polycam_transform.py" \
-    --transform "$motive_map_transform" \
-    --glb-sha256 "${glb_sha256,,}" \
-    --surface-sha256 "${surface_sha256,,}" \
-    --structural-map-sha256 "${structural_map_sha256,,}" \
-    --pelvis-rigid-body-id "$rigid_body_id" \
-    --pelvis-rigid-body-name "$rigid_body_name" \
-    >/dev/null
+  if [[ "$motive_mode" == required ]]; then
+    python3 "$script_dir/validate_motive_polycam_transform.py" \
+      --transform "$motive_map_transform" \
+      --glb-sha256 "${glb_sha256,,}" \
+      --surface-sha256 "${surface_sha256,,}" \
+      --structural-map-sha256 "${structural_map_sha256,,}" \
+      --pelvis-rigid-body-id "$rigid_body_id" \
+      --pelvis-rigid-body-name "$rigid_body_name" \
+      >/dev/null
+  fi
 fi
 route_to_robot="$(ip route get "$robot_host" | head -1)"
 [[ "$route_to_robot" != *" via "* ]] || { echo "robot route is not direct: $route_to_robot" >&2; exit 4; }
 [[ "$route_to_robot" == *" dev $network_interface "* ]] || { echo "wrong robot NIC: $route_to_robot" >&2; exit 4; }
 offboard_robot_address="$(awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' <<<"$route_to_robot")"
-motive_route="$(ip route get "$motive_server" | head -1)"
-motive_client_address="$(awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' <<<"$motive_route")"
-[[ "$offboard_robot_address" == 192.168.123.* && -n "$motive_client_address" ]] || {
-  echo "could not resolve G1 or Motive route" >&2
+if [[ "$motive_mode" == required ]]; then
+  motive_route="$(ip route get "$motive_server" | head -1)"
+  motive_client_address="$(awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' <<<"$motive_route")"
+else
+  motive_client_address=disabled
+fi
+[[ "$offboard_robot_address" == 192.168.123.* ]] || {
+  echo "could not resolve the G1 route" >&2
   exit 4
 }
+if [[ "$motive_mode" == required && -z "$motive_client_address" ]]; then
+  echo "could not resolve the Motive route" >&2
+  exit 4
+fi
 
 if [[ "$dry_run" == true ]]; then
   cat <<EOF
@@ -212,6 +237,7 @@ duration_sec=$duration_sec
 capture_class=$capture_class
 robot=$robot_user@$robot_host
 robot_interface=$network_interface
+motive_mode=$motive_mode
 motive=$motive_server client=$motive_client_address
 rigid_body=$rigid_body_name id=$rigid_body_id
 image=$image
@@ -241,7 +267,7 @@ done
 [[ ! -e "$run_dir" ]] || { echo "refusing to overwrite $run_dir" >&2; exit 2; }
 mkdir -p "$run_dir"/{logs,motive,lowstate,rosbag,runtime,traces}
 run_dir="$(cd "$run_dir" && pwd -P)"
-if [[ "$integrated_robot_vlm" == true ]]; then
+if [[ "$integrated_robot_vlm" == true && "$motive_mode" == required ]]; then
   cp -- "$motive_map_transform" "$run_dir/runtime/motive-to-polycam.json"
 fi
 trial_id="$(basename "$run_dir")"
@@ -271,7 +297,8 @@ pathlib.Path(r"$run_dir/manifest.json").write_text(json.dumps({
   "source_dirty_digest": "$source_dirty_digest",
   "container_image": "$image",
   "container_image_id": "$image_id",
-  "motive_role": "evaluator_only",
+  "motive_mode": "$motive_mode",
+  "motive_role": "$(if [[ "$motive_mode" == required ]]; then echo evaluator_only; else echo disabled; fi)",
   "command_capability": "structurally_unavailable",
   "actuation_publishers_created": 0,
   "integrated_robot_vlm": $integrated_python,
@@ -291,11 +318,13 @@ printf '\n' >>"$run_dir/command.txt"
 ssh -o BatchMode=yes "$robot_user@$robot_host" \
   "test -x '$robot_python' && \
    '$robot_python' -c 'import unitree_sdk2py' && \
-   test -d '$robot_localization_root/mocap_utils' && \
    mkdir -p '$remote_stage'"
 scp -q -r "$repo_root/g1_root_state_bridge/g1_root_state_bridge" "$robot_user@$robot_host:$remote_stage/"
-scp -q -r "$robot_user@$robot_host:$robot_localization_root/mocap_utils" "$run_dir/runtime/"
-python3 - "$run_dir/runtime/mocap_utils" <<'PY'
+if [[ "$motive_mode" == required ]]; then
+  ssh -o BatchMode=yes "$robot_user@$robot_host" \
+    "test -d '$robot_localization_root/mocap_utils'"
+  scp -q -r "$robot_user@$robot_host:$robot_localization_root/mocap_utils" "$run_dir/runtime/"
+  python3 - "$run_dir/runtime/mocap_utils" <<'PY'
 from pathlib import Path
 import sys
 for path in Path(sys.argv[1]).glob("*.py"):
@@ -304,6 +333,7 @@ for path in Path(sys.argv[1]).glob("*.py"):
     if source != normalized:
         path.write_bytes(normalized)
 PY
+fi
 python3 "$script_dir/probe_g1_clock.py" \
   --target "$robot_user@$robot_host" \
   --output "$run_dir/clock_probe.json" \
@@ -433,19 +463,22 @@ fi
 
 cyclonedds_uri="<CycloneDDS><Domain id=\"any\"><General><Interfaces><NetworkInterface name=\"$network_interface\" /></Interfaces></General></Domain></CycloneDDS>"
 
-python3 "$script_dir/record_natnet_reference.py" \
-  --sdk-root "$run_dir/runtime" \
-  --server-address "$motive_server" \
-  --client-address "$motive_client_address" \
-  --connection multicast \
-  --rigid-body-id "$rigid_body_id" \
-  --rigid-body-name "$rigid_body_name" \
-  --duration-sec "$duration_sec" \
-  --minimum-tracking-coverage 0.99 \
-  --output "$run_dir/motive/frames.jsonl" \
-  --summary "$run_dir/motive/summary.json" \
-  >"$run_dir/logs/motive.log" 2>&1 &
-motive_pid=$!
+motive_status=0
+if [[ "$motive_mode" == required ]]; then
+  python3 "$script_dir/record_natnet_reference.py" \
+    --sdk-root "$run_dir/runtime" \
+    --server-address "$motive_server" \
+    --client-address "$motive_client_address" \
+    --connection multicast \
+    --rigid-body-id "$rigid_body_id" \
+    --rigid-body-name "$rigid_body_name" \
+    --duration-sec "$duration_sec" \
+    --minimum-tracking-coverage 0.99 \
+    --output "$run_dir/motive/frames.jsonl" \
+    --summary "$run_dir/motive/summary.json" \
+    >"$run_dir/logs/motive.log" 2>&1 &
+  motive_pid=$!
+fi
 
 PYTHONPATH="$repo_root/g1_root_state_bridge" python3 \
   -m g1_root_state_bridge.g1_dynamic_capture_recorder \
@@ -512,7 +545,9 @@ if [[ "$integrated_robot_vlm" == true ]]; then
 fi
 
 set +e
-wait "$motive_pid"; motive_status=$?
+if [[ "$motive_mode" == required ]]; then
+  wait "$motive_pid"; motive_status=$?
+fi
 wait "$lowstate_pid"; lowstate_status=$?
 wait "$relay_pid"; relay_status=$?
 wait "$bag_pid"; bag_status=$?
@@ -550,7 +585,7 @@ EOF
 python3 "$script_dir/validate_g1_kiss_live_verification.py" \
   --run-dir "$run_dir" \
   --output "$run_dir/validation.json"
-if [[ "$integrated_robot_vlm" == true ]]; then
+if [[ "$integrated_robot_vlm" == true && "$motive_mode" == required ]]; then
   docker run --rm --entrypoint /bin/bash \
     --user "$(id -u):$(id -g)" \
     --network none \

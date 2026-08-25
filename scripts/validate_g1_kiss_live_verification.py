@@ -59,8 +59,18 @@ def last_live_status(log_path: Path) -> dict[str, Any]:
 def validate(run_dir: Path) -> dict[str, Any]:
     manifest = load_json(run_dir / "manifest.json")
     duration_sec = float(manifest["duration_sec"])
+    motive_mode = str(manifest.get("motive_mode", "required"))
+    if motive_mode not in {"required", "disabled"}:
+        raise ValueError(f"unsupported Motive mode: {motive_mode}")
     process_status = load_json(run_dir / "process_status.json")
-    motive = load_json(run_dir / "motive" / "summary.json")
+    motive = (
+        load_json(run_dir / "motive" / "summary.json")
+        if motive_mode == "required"
+        else {
+            "status": "disabled",
+            "role": "not an online localization input",
+        }
+    )
     lowstate = load_json(run_dir / "lowstate" / "summary.json")
     counts = bag_counts(run_dir / "rosbag" / "live_localization" / "metadata.yaml")
     live = last_live_status(run_dir / "logs" / "live_stack.log")
@@ -69,7 +79,7 @@ def validate(run_dir: Path) -> dict[str, Any]:
     lidar = int(stats["lidar"])
     availability = published / lidar if lidar else 0.0
     process_ok = all(int(value) == 0 for value in process_status.values())
-    motive_ok = (
+    motive_ok = motive_mode == "disabled" or (
         bool(motive.get("connected"))
         and int(motive.get("resolved_rigid_body_id", -1)) == 42
         and str(motive.get("rigid_body_name")) == "G1_PELVIS_F_4123"
@@ -107,7 +117,7 @@ def validate(run_dir: Path) -> dict[str, Any]:
     )
     checks = {
         "processes": {"ok": process_ok, "statuses": process_status},
-        "motive": {"ok": motive_ok, **motive},
+        "motive": {"ok": motive_ok, "mode": motive_mode, **motive},
         "lowstate": {"ok": lowstate_ok, **lowstate},
         "rosbag": {"ok": bag_ok, "message_counts": counts},
         "live_localization": {
@@ -174,20 +184,21 @@ def validate(run_dir: Path) -> dict[str, Any]:
             }
         )
     passed = all(bool(check["ok"]) for check in checks.values())
+    evidence_class = {
+        "stationary": "passive stationary live-localization capture",
+        "amo-walk": "operator-controlled AMO live-localization capture",
+        "amo-stress": "operator-controlled AMO stress live-localization capture",
+    }.get(str(manifest.get("capture_class", "stationary")), "live-localization capture")
+    if motive_mode == "disabled":
+        evidence_class += " without external ground truth"
     return {
         "schema": "g1_kiss_live_verification_validation_v1",
         "status": "pass" if passed else "fail",
         "run_dir": str(run_dir.resolve()),
         "checks": checks,
-        "evidence_class": (
-            {
-                "stationary": "passive stationary live-localization capture",
-                "amo-walk": "operator-controlled AMO live-localization capture",
-                "amo-stress": "operator-controlled AMO stress live-localization capture",
-            }.get(str(manifest.get("capture_class", "stationary")), "live-localization capture")
-            if passed
-            else "incomplete passive capture"
-        ),
+        "evidence_class": evidence_class if passed else "incomplete passive capture",
+        "absolute_map_pose_accuracy_evaluated": False,
+        "external_ground_truth_recorded": motive_mode == "required",
         "hardware_actuation_clearance": False,
     }
 
