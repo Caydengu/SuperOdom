@@ -719,7 +719,7 @@ if [[ "$integrated_robot_vlm" == true ]]; then
     export ROBOT_VLM_STRUCTURAL_MAP_SHA256="${structural_map_sha256,,}"
     export ROBOT_VLM_LOCALIZATION_CALIBRATION_SHA256="$calibration_digest"
     export ROBOT_VLM_REQUIRE_INERTIAL_HEADING=1
-    export ROBOT_VLM_MAP_POSITION_POLICY=initialize_once_heading_only
+    export ROBOT_VLM_MAP_POSITION_POLICY=initialization_only
     export ROBOT_VLM_MAP_ARTIFACT="$map_artifact"
     PYTHONPATH=src "$robot_vlm_python" scripts/probe_real_backend_localization.py \
       --map-artifact "$map_artifact" \
