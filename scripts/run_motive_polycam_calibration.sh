@@ -8,17 +8,19 @@ Usage: run_motive_polycam_calibration.sh --robot-vlm-repo PATH --sdk-root PATH \
   --structural-map-sha256 HEX --rigid-body-id ID --rigid-body-name NAME \
   --output-dir PATH [options]
 
-Launch the non-actuating Motive-pointer to Polycam-map calibration UI. The
-pointer rigid body's Motive origin must first be pivot-calibrated to its
-physical tip. Collect at least four widely separated fit points and one held-out
-point. This tool never consumes robot localization, so the ground-truth
-transform remains independent of the estimator being evaluated.
+Launch the non-actuating Motive-control-point to Polycam-map calibration UI.
+Prefer fixed-asset labeled markers via repeatable `--anchor-rigid-body`; otherwise
+the pointer rigid body's Motive origin must be pivot-calibrated to its physical
+tip. Collect at least four widely separated fit points and one held-out point.
+This tool never consumes robot localization, so the ground-truth transform
+remains independent of the estimator being evaluated.
 
 Options:
   --motive-server ADDRESS  default: 172.24.68.77
   --motive-client ADDRESS  local address used for NatNet; required unless dry-run
   --pelvis-rigid-body-id ID default: 42
   --pelvis-rigid-body-name NAME default: G1_PELVIS_F_4123
+  --anchor-rigid-body ID:NAME fixed asset whose labeled markers are controls; repeatable
   --port PORT              Viser web port; default: 8083
   --duration-sec N         bounded launch, 60..3600; default: 1200
   --image IMAGE            default: tml/robot-vlm-localization-ui:2026-08-24-humble
@@ -37,6 +39,7 @@ rigid_body_id=""
 rigid_body_name=""
 pelvis_rigid_body_id=42
 pelvis_rigid_body_name=G1_PELVIS_F_4123
+anchor_rigid_bodies=()
 output_dir=""
 motive_server=172.24.68.77
 motive_client=""
@@ -59,6 +62,7 @@ while (( $# )); do
     --rigid-body-name) rigid_body_name=$2; shift 2 ;;
     --pelvis-rigid-body-id) pelvis_rigid_body_id=$2; shift 2 ;;
     --pelvis-rigid-body-name) pelvis_rigid_body_name=$2; shift 2 ;;
+    --anchor-rigid-body) anchor_rigid_bodies+=("$2"); shift 2 ;;
     --output-dir) output_dir=$2; shift 2 ;;
     --motive-server) motive_server=$2; shift 2 ;;
     --motive-client) motive_client=$2; shift 2 ;;
@@ -82,6 +86,12 @@ done
 [[ -n "$rigid_body_name" && "$rigid_body_name" != *$'\n'* ]] || { echo "invalid rigid-body name" >&2; exit 2; }
 [[ "$pelvis_rigid_body_id" =~ ^[0-9]+$ ]] || { echo "pelvis rigid-body ID must be a nonnegative integer" >&2; exit 2; }
 [[ -n "$pelvis_rigid_body_name" && "$pelvis_rigid_body_name" != *$'\n'* ]] || { echo "invalid pelvis rigid-body name" >&2; exit 2; }
+for anchor in "${anchor_rigid_bodies[@]}"; do
+  [[ "$anchor" =~ ^[0-9]+:[A-Za-z0-9_.-]+$ ]] || {
+    echo "invalid --anchor-rigid-body '$anchor'; expected ID:NAME" >&2
+    exit 2
+  }
+done
 [[ -n "$output_dir" ]] || { echo "output directory is required" >&2; exit 2; }
 [[ "$port" =~ ^[0-9]+$ ]] && (( 10#$port > 0 && 10#$port <= 65535 )) || { echo "invalid port" >&2; exit 2; }
 [[ "$duration_sec" =~ ^[0-9]+$ ]] && (( 10#$duration_sec >= 60 && 10#$duration_sec <= 3600 )) || { echo "duration must be from 60 through 3600 seconds" >&2; exit 2; }
@@ -145,6 +155,9 @@ docker_command=(
   --transform-output /opt/output/motive-to-polycam.json
   --port "$port"
 )
+for anchor in "${anchor_rigid_bodies[@]}"; do
+  docker_command+=(--anchor-rigid-body "$anchor")
+done
 
 if [[ "$dry_run" == true ]]; then
   cat <<EOF
@@ -160,6 +173,7 @@ rigid_body_id=$rigid_body_id
 rigid_body_name=$rigid_body_name
 pelvis_rigid_body_id=$pelvis_rigid_body_id
 pelvis_rigid_body_name=$pelvis_rigid_body_name
+anchor_rigid_bodies=${anchor_rigid_bodies[*]}
 motive_server=$motive_server
 motive_client=$motive_client
 output_dir=$output_dir

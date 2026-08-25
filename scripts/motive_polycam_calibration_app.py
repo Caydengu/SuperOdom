@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Pair a pivot-calibrated Motive pointer with clicks on the exact Polycam map."""
+"""Pair Motive control points with clicks on the exact Polycam map.
+
+The preferred fixed-anchor mode uses labeled markers from immobile Motive rigid
+bodies.  A legacy pivot-calibrated pointer remains supported for rooms without
+fixed anchors.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +23,10 @@ from pathlib import Path
 import numpy as np
 import viser
 
-from fit_motive_map_transform import _content_sha256, fit_control_points
+try:
+    from scripts.fit_motive_map_transform import _content_sha256, fit_control_points
+except ModuleNotFoundError:  # Direct execution from a staged scripts/ directory.
+    from fit_motive_map_transform import _content_sha256, fit_control_points
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -133,9 +141,116 @@ class MotiveBuffer:
         }
 
 
+class MotiveMarkerBuffer:
+    """Recent world-frame positions of labeled markers from fixed rigid bodies."""
+
+    def __init__(self, anchors: dict[int, str]) -> None:
+        self.anchors = {int(key): str(value) for key, value in anchors.items()}
+        self.lock = threading.Lock()
+        self.rows: dict[tuple[int, int], deque[tuple[int, np.ndarray, float]]] = {}
+        self.frames = 0
+
+    def append(self, marker_sets, bodies: dict[int, object], now_ns: int) -> None:
+        by_name = {}
+        for marker_set in marker_sets:
+            raw_name = marker_set.model_name
+            name = raw_name.decode("utf-8") if isinstance(raw_name, bytes) else str(raw_name)
+            by_name[name] = marker_set
+        with self.lock:
+            self.frames += 1
+            cutoff = now_ns - 3_000_000_000
+            for model_id, model_name in self.anchors.items():
+                body = bodies.get(model_id)
+                marker_set = by_name.get(model_name)
+                if (
+                    body is None
+                    or not bool(body.tracking_valid)
+                    or marker_set is None
+                ):
+                    continue
+                for marker_id, position in enumerate(marker_set.marker_pos_list):
+                    key = (model_id, marker_id)
+                    rows = self.rows.setdefault(key, deque())
+                    rows.append(
+                        (
+                            now_ns,
+                            np.asarray(position, dtype=np.float64),
+                            float(getattr(body, "error", 0.0)),
+                        )
+                    )
+            for rows in self.rows.values():
+                while rows and rows[0][0] < cutoff:
+                    rows.popleft()
+
+    def sources(self, *, window_sec: float = 1.0) -> dict[str, tuple[int, int]]:
+        cutoff = time.monotonic_ns() - round(window_sec * 1e9)
+        with self.lock:
+            available = {
+                key: sum(row[0] >= cutoff for row in rows)
+                for key, rows in self.rows.items()
+            }
+        result = {}
+        for (model_id, marker_id), count in sorted(available.items()):
+            if count >= 20:
+                label = (
+                    f"{self.anchors[model_id]} [{model_id}] "
+                    f"Marker {marker_id + 1:03d}"
+                )
+                result[label] = (model_id, marker_id)
+        return result
+
+    def stable_position(
+        self,
+        source: tuple[int, int],
+        *,
+        window_sec: float,
+        max_std_m: float,
+    ) -> tuple[np.ndarray, dict]:
+        cutoff = time.monotonic_ns() - round(window_sec * 1e9)
+        with self.lock:
+            selected = [
+                row for row in self.rows.get(source, ()) if row[0] >= cutoff
+            ]
+            frames = self.frames
+        minimum = max(20, round(window_sec * 60.0))
+        if len(selected) < minimum:
+            raise ValueError(
+                f"only {len(selected)} valid labeled-marker frames in the last "
+                f"{window_sec:.1f}s"
+            )
+        positions = np.asarray([row[1] for row in selected], dtype=np.float64)
+        standard_deviation = np.std(positions, axis=0)
+        if float(np.max(standard_deviation)) > max_std_m:
+            raise ValueError(
+                "fixed marker is moving: maximum axis std="
+                f"{float(np.max(standard_deviation))*1000:.1f} mm"
+            )
+        model_id, marker_id = source
+        return np.median(positions, axis=0), {
+            "sample_count": len(positions),
+            "axis_std_m": standard_deviation.tolist(),
+            "rigid_body_marker_error_median_m": float(
+                np.median([row[2] for row in selected])
+            ),
+            "frames_seen": frames,
+            "rigid_body_id": model_id,
+            "rigid_body_name": self.anchors[model_id],
+            "marker_id": marker_id,
+            "source_contract": (
+                "NatNet MarkerSetData world point by stable marker index; "
+                "parent rigid body tracking-valid"
+            ),
+        }
+
+
 class MotiveStreams:
-    def __init__(self, *buffers: MotiveBuffer) -> None:
+    def __init__(
+        self,
+        *buffers: MotiveBuffer,
+        marker_buffer: MotiveMarkerBuffer | None = None,
+    ) -> None:
         self.buffers = tuple(buffers)
+        self.marker_buffer = marker_buffer
 
     def callback(self, data) -> None:
         bodies = getattr(data.get("rigid_body_data"), "rigid_body_list", ())
@@ -143,6 +258,9 @@ class MotiveStreams:
         now_ns = time.monotonic_ns()
         for buffer in self.buffers:
             buffer.append(by_id.get(buffer.rigid_body_id), now_ns)
+        if self.marker_buffer is not None:
+            marker_sets = getattr(data.get("marker_set_data"), "marker_data_list", ())
+            self.marker_buffer.append(marker_sets, by_id, now_ns)
 
 
 class CalibrationApp:
@@ -152,11 +270,13 @@ class CalibrationApp:
         client,
         pointer: MotiveBuffer,
         pelvis: MotiveBuffer,
+        fixed_markers: MotiveMarkerBuffer,
     ) -> None:
         self.args = args
         self.client = client
         self.pointer = pointer
         self.pelvis = pelvis
+        self.fixed_markers = fixed_markers
         sys.path.insert(0, str(args.localize_dir.resolve()))
         from mesh_map import load_mesh_map
 
@@ -181,14 +301,32 @@ class CalibrationApp:
         self.heading_clicks: list[np.ndarray] = []
         self.transform_result: dict | None = None
         self.points = []
+        self.point_handles = {}
         self.stop = threading.Event()
-        self.status = self.server.gui.add_markdown("Waiting for the Motive pointer...")
+        self.status = self.server.gui.add_markdown(
+            "Waiting for fixed Motive markers..."
+            if self.fixed_markers.anchors
+            else "Waiting for the Motive pointer..."
+        )
         self.label = self.server.gui.add_text("Landmark label", initial_value="p1")
         self.role = self.server.gui.add_dropdown("Role", options=("fit", "holdout"), initial_value="fit")
+        initial_sources = (
+            ("Waiting for fixed Motive markers...",)
+            if self.fixed_markers.anchors
+            else (f"pointer [{self.args.rigid_body_id}] origin",)
+        )
+        self.source = self.server.gui.add_dropdown(
+            "Motive control source", options=initial_sources, initial_value=initial_sources[0]
+        )
+        self.source_lookup: dict[str, tuple[int, int]] = {}
+        self.refresh_sources = self.server.gui.add_button("Refresh fixed marker list")
         self.arm = self.server.gui.add_button("Arm next map click")
+        self.undo = self.server.gui.add_button("Undo last pair")
         self.finalize = self.server.gui.add_button("Fit + validate Motive → map")
         self.arm_heading = self.server.gui.add_button("Arm G1 forward heading (2 clicks)")
         self.arm.on_click(self._arm)
+        self.undo.on_click(self._undo)
+        self.refresh_sources.on_click(self._refresh_source_options)
         self.finalize.on_click(self._finalize)
         self.arm_heading.on_click(self._arm_heading)
         self._load_existing()
@@ -206,9 +344,20 @@ class CalibrationApp:
             "map_identity": self._identity(),
             "motive_contract": {
                 "up_axis": "y", "horizontal_axes": ["x", "z"],
+                "control_source": (
+                    "fixed_labeled_markers" if self.fixed_markers.anchors
+                    else "pivot_calibrated_pointer"
+                ),
                 "rigid_body_id": self.args.rigid_body_id,
                 "rigid_body_name": self.args.rigid_body_name,
-                "pointer_contract": "Motive rigid-body origin is pivot-calibrated to the physical tip",
+                "pointer_contract": (
+                    "unused in fixed-anchor mode" if self.fixed_markers.anchors
+                    else "Motive rigid-body origin is pivot-calibrated to the physical tip"
+                ),
+                "fixed_anchor_rigid_bodies": [
+                    {"rigid_body_id": key, "rigid_body_name": value}
+                    for key, value in sorted(self.fixed_markers.anchors.items())
+                ],
             },
             "points": self.points,
         }
@@ -221,10 +370,7 @@ class CalibrationApp:
             raise ValueError("existing control points belong to another map identity")
         self.points = list(value.get("points", []))
         for row in self.points:
-            self.server.scene.add_icosphere(
-                f"/control-points/{row['label']}", radius=0.07, position=row["map_xyz_m"],
-                color=(49, 208, 170) if row["role"] == "fit" else (251, 191, 36),
-            )
+            self._draw_control_point(row)
         if self.args.transform_output.exists():
             result = json.loads(self.args.transform_output.read_text(encoding="utf-8"))
             if result.get("map_identity") != self._identity():
@@ -239,6 +385,56 @@ class CalibrationApp:
                 raise ValueError("existing transform does not match the saved control points")
             self.transform_result = result
 
+    def _draw_control_point(self, row: dict) -> None:
+        self.point_handles[row["label"]] = self.server.scene.add_icosphere(
+            f"/control-points/{row['label']}",
+            radius=0.07,
+            position=row["map_xyz_m"],
+            color=(49, 208, 170) if row["role"] == "fit" else (251, 191, 36),
+        )
+
+    def _invalidate_transform(self) -> None:
+        self.transform_result = None
+        self.args.transform_output.unlink(missing_ok=True)
+
+    def _undo(self, _event) -> None:
+        self.armed = False
+        self.heading_clicks = []
+        if not self.points:
+            self.status.content = "### 🟡 There is no saved control-point pair to undo."
+            return
+        row = self.points.pop()
+        handle = self.point_handles.pop(row["label"], None)
+        if handle is not None:
+            handle.remove()
+        self._invalidate_transform()
+        _atomic_json(self.args.control_points, self._value())
+        self.status.content = (
+            f"### ✅ Removed `{row['label']}`\nAny previous transform fit was invalidated."
+        )
+
+    def _refresh_source_options(self, _event=None) -> None:
+        if not self.fixed_markers.anchors:
+            return
+        sources = self.fixed_markers.sources()
+        if not sources:
+            self.status.content = (
+                "### 🟡 Waiting for fixed markers\n"
+                "No tracking-valid marker-set points from the configured assets have "
+                "been stable for one second."
+            )
+            return
+        previous = self.source.value
+        self.source_lookup = sources
+        self.source.options = tuple(sources)
+        if previous in sources:
+            self.source.value = previous
+        self.status.content = (
+            f"### ✅ {len(sources)} fixed Motive markers available\n"
+            "Choose one marker, arm the map click, and click the center of the same "
+            "physical marker sphere on the Polycam mesh."
+        )
+
     def _arm(self, _event) -> None:
         label = self.label.value.strip()
         if not label:
@@ -249,10 +445,20 @@ class CalibrationApp:
             return
         self.heading_clicks = []
         self.armed = True
-        self.status.content = (
-            f"### 🟡 Armed `{label}`\nHold the pivot-calibrated tip still on that floor landmark, "
-            "then click the same location on the Polycam floor."
-        )
+        if self.fixed_markers.anchors:
+            if self.source.value not in self.source_lookup:
+                self.armed = False
+                self.status.content = "### 🔴 Refresh and select a live fixed Motive marker first."
+                return
+            instruction = (
+                f"Click the center of `{self.source.value}` on the Polycam mesh."
+            )
+        else:
+            instruction = (
+                "Hold the pivot-calibrated tip still on that landmark, then click "
+                "the same location on the Polycam mesh."
+            )
+        self.status.content = f"### 🟡 Armed `{label}`\n{instruction}"
 
     def _map_floor_click(self, event) -> np.ndarray:
         origin = np.asarray(event.ray_origin, dtype=np.float64)
@@ -265,29 +471,51 @@ class CalibrationApp:
             raise ValueError("click ray does not intersect the map floor in front of the camera")
         return origin + distance * direction
 
+    def _map_surface_click(self, event) -> np.ndarray:
+        origin = np.asarray(event.ray_origin, dtype=np.float64)
+        direction = np.asarray(event.ray_direction, dtype=np.float64)
+        locations, _, _ = self.mesh.mesh.ray.intersects_location(
+            origin.reshape(1, 3), direction.reshape(1, 3), multiple_hits=True
+        )
+        if not len(locations):
+            raise ValueError("click ray did not intersect the Polycam mesh")
+        distance = np.linalg.norm(locations - origin, axis=1)
+        return np.asarray(locations[int(np.argmin(distance))], dtype=np.float64)
+
     def _on_mesh_click(self, event) -> None:
         if not self.armed and not self.heading_clicks:
             return
         try:
-            map_point = self._map_floor_click(event)
             if self.heading_clicks:
+                map_point = self._map_floor_click(event)
                 self._heading_click(map_point)
                 return
-            motive_point, stability = self.pointer.stable_position(
-                self.args.motive_window_sec, self.args.maximum_pointer_std_m
-            )
+            map_point = self._map_surface_click(event)
+            if self.fixed_markers.anchors:
+                source = self.source_lookup.get(self.source.value)
+                if source is None:
+                    raise ValueError("selected fixed marker is no longer available")
+                motive_point, stability = self.fixed_markers.stable_position(
+                    source,
+                    window_sec=self.args.motive_window_sec,
+                    max_std_m=self.args.maximum_pointer_std_m,
+                )
+            else:
+                motive_point, stability = self.pointer.stable_position(
+                    self.args.motive_window_sec, self.args.maximum_pointer_std_m
+                )
             row = {
                 "label": self.label.value.strip(), "role": self.role.value,
                 "map_xyz_m": [float(map_point[0]), float(map_point[1]), float(map_point[2])],
                 "motive_xyz_m": [float(value) for value in motive_point],
-                "motive_stability": stability, "captured_realtime_ns": time.time_ns(),
+                "motive_stability": stability,
+                "motive_control_source": self.source.value,
+                "captured_realtime_ns": time.time_ns(),
             }
             self.points.append(row)
+            self._invalidate_transform()
             _atomic_json(self.args.control_points, self._value())
-            self.server.scene.add_icosphere(
-                f"/control-points/{row['label']}", radius=0.07, position=row["map_xyz_m"],
-                color=(49, 208, 170) if row["role"] == "fit" else (251, 191, 36),
-            )
+            self._draw_control_point(row)
             self.armed = False
             self.label.value = f"p{len(self.points) + 1}"
             self.status.content = (
@@ -384,8 +612,11 @@ class CalibrationApp:
 
     def run(self) -> None:
         print(f"Motive/Polycam calibration UI: http://localhost:{self.args.port}", flush=True)
+        next_refresh = 0.0
         while not self.stop.wait(0.25):
-            pass
+            if self.fixed_markers.anchors and time.monotonic() >= next_refresh:
+                self._refresh_source_options()
+                next_refresh = time.monotonic() + 1.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -401,6 +632,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--client-address", required=True)
     parser.add_argument("--rigid-body-id", type=int, required=True)
     parser.add_argument("--rigid-body-name", required=True)
+    parser.add_argument(
+        "--anchor-rigid-body",
+        action="append",
+        default=[],
+        metavar="ID:NAME",
+        help="fixed rigid body whose labeled markers are map control points; repeatable",
+    )
     parser.add_argument("--pelvis-rigid-body-id", type=int, default=42)
     parser.add_argument("--pelvis-rigid-body-name", default="G1_PELVIS_F_4123")
     parser.add_argument("--control-points", type=Path, required=True)
@@ -417,6 +655,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    anchors: dict[int, str] = {}
+    for raw in args.anchor_rigid_body:
+        try:
+            raw_id, raw_name = raw.split(":", 1)
+            anchor_id = int(raw_id)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"invalid --anchor-rigid-body {raw!r}; expected ID:NAME") from error
+        if anchor_id < 0 or not raw_name:
+            raise ValueError(f"invalid --anchor-rigid-body {raw!r}; expected ID:NAME")
+        if anchor_id in anchors and anchors[anchor_id] != raw_name:
+            raise ValueError(f"conflicting names for fixed rigid body {anchor_id}")
+        anchors[anchor_id] = raw_name
     package_root = args.sdk_root / "mocap_utils"
     if not package_root.is_dir():
         raise FileNotFoundError(f"NatNet SDK package is missing: {package_root}")
@@ -430,13 +680,14 @@ def main() -> int:
         client.set_print_level(0)
     pointer = MotiveBuffer(args.rigid_body_id, args.rigid_body_name)
     pelvis = MotiveBuffer(args.pelvis_rigid_body_id, args.pelvis_rigid_body_name)
-    streams = MotiveStreams(pointer, pelvis)
+    fixed_markers = MotiveMarkerBuffer(anchors)
+    streams = MotiveStreams(pointer, pelvis, marker_buffer=fixed_markers)
     client.new_frame_listener = streams.callback
     if not client.run():
         raise RuntimeError("NatNet client failed to start")
     client.data_socket.settimeout(0.1)
     client.command_socket.settimeout(0.1)
-    app = CalibrationApp(args, client, pointer, pelvis)
+    app = CalibrationApp(args, client, pointer, pelvis, fixed_markers)
 
     def stop(_signum, _frame):
         app.stop.set()
