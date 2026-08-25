@@ -22,6 +22,13 @@ from g1_root_state_bridge.structural_map_localization import (
 from g1_root_state_bridge.ui_initialization import load_ui_map_initialization
 
 
+TREATMENTS = (
+    "initialization-only",
+    "stopped-only-full-se2",
+    "periodic-full-se2",
+)
+
+
 def _load_odometry(
     path: Path, topic: str, treatment: str | None
 ) -> list[dict[str, object]]:
@@ -65,6 +72,47 @@ def _json_safe(value: object) -> object:
     return value
 
 
+def _window_is_stationary(
+    odometry: list[dict[str, object]],
+    source_time_ns: np.ndarray,
+    *,
+    end_time_ns: int,
+    window_sec: float,
+    maximum_linear_speed_mps: float,
+    maximum_yaw_rate_radps: float,
+) -> tuple[bool, dict[str, float]]:
+    start_time_ns = end_time_ns - round(window_sec * 1e9)
+    first = int(np.searchsorted(source_time_ns, start_time_ns, side="left"))
+    last = int(np.searchsorted(source_time_ns, end_time_ns, side="right"))
+    selected = odometry[first:last]
+    coverage_sec = (
+        0.0
+        if len(selected) < 2
+        else (int(selected[-1]["source_time_ns"]) - int(selected[0]["source_time_ns"]))
+        * 1e-9
+    )
+    if len(selected) < 3 or coverage_sec < 0.95 * window_sec:
+        return False, {"coverage_sec": coverage_sec}
+    linear = np.asarray(
+        [row["linear_velocity_xyz_mps"][:2] for row in selected], dtype=np.float64
+    )
+    yaw_rate = np.asarray(
+        [row["angular_velocity_xyz_radps"][2] for row in selected], dtype=np.float64
+    )
+    speed_p90 = float(np.quantile(np.linalg.norm(linear, axis=1), 0.90))
+    yaw_rate_p90 = float(np.quantile(np.abs(yaw_rate), 0.90))
+    audit = {
+        "coverage_sec": coverage_sec,
+        "linear_speed_p90_mps": speed_p90,
+        "yaw_rate_p90_radps": yaw_rate_p90,
+    }
+    return (
+        speed_p90 <= maximum_linear_speed_mps
+        and yaw_rate_p90 <= maximum_yaw_rate_radps,
+        audit,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--map", type=Path, required=True)
@@ -76,6 +124,11 @@ def main() -> int:
     parser.add_argument("--odometry-topic", default="/g1/localization/pelvis_odom")
     parser.add_argument("--odometry-treatment")
     parser.add_argument("--local-source-epoch", type=int, required=True)
+    parser.add_argument("--treatment", choices=TREATMENTS, default="initialization-only")
+    parser.add_argument("--correction-period-sec", type=float, default=5.0)
+    parser.add_argument("--stationary-window-sec", type=float, default=5.0)
+    parser.add_argument("--stationary-linear-speed-mps", type=float, default=0.05)
+    parser.add_argument("--stationary-yaw-rate-radps", type=float, default=0.15)
     parser.add_argument(
         "--initialization-receipt",
         type=Path,
@@ -84,6 +137,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--packets-output", type=Path, required=True)
     args = parser.parse_args()
+    if args.correction_period_sec <= 0.0 or args.stationary_window_sec <= 0.0:
+        parser.error("correction period and stationary window must be positive")
     if args.output.exists() or args.packets_output.exists():
         raise FileExistsError("refusing to overwrite map-replay output")
 
@@ -111,9 +166,14 @@ def main() -> int:
         args.odometry, args.odometry_topic, args.odometry_treatment
     )
     odom_index = 0
+    odometry_time_ns = np.asarray(
+        [row["source_time_ns"] for row in odometry], dtype=np.int64
+    )
     attempts: list[dict[str, object]] = []
     packets: list[dict[str, object]] = []
     last_attempt_ns = 0
+    stopped_episode_applied = False
+    last_motion_evidence_ns: int | None = None
     with np.load(args.registered_clouds, allow_pickle=False) as archive:
         points = np.asarray(archive["points_xyz_m"], dtype=np.float32)
         offsets = np.asarray(archive["cloud_offsets"], dtype=np.int64)
@@ -148,11 +208,58 @@ def main() -> int:
         if engine.rotation is None:
             window_sec = config.global_window_sec
         else:
-            if int(evidence_ns) - last_attempt_ns < round(
-                config.tracking_period_sec * 1e9
-            ):
+            if args.treatment == "initialization-only":
                 continue
-            window_sec = config.tracking_window_sec
+            window_sec = args.correction_period_sec
+            if args.treatment == "periodic-full-se2":
+                if int(evidence_ns) - last_attempt_ns < round(
+                    args.correction_period_sec * 1e9
+                ):
+                    continue
+            else:
+                if last_motion_evidence_ns is None:
+                    last_motion_evidence_ns = int(cloud_time[0])
+                _, recent_motion_audit = _window_is_stationary(
+                    odometry,
+                    odometry_time_ns,
+                    end_time_ns=int(evidence_ns),
+                    window_sec=1.0,
+                    maximum_linear_speed_mps=args.stationary_linear_speed_mps,
+                    maximum_yaw_rate_radps=args.stationary_yaw_rate_radps,
+                )
+                # Reset the episode only on positive motion evidence.  A 10 Hz
+                # odometry stream can cover slightly under one nominal second;
+                # missing coverage must not manufacture a new stop episode.
+                moving = (
+                    recent_motion_audit.get("coverage_sec", 0.0) >= 0.75
+                    and (
+                        recent_motion_audit.get("linear_speed_p90_mps", 0.0)
+                        > 2.0 * args.stationary_linear_speed_mps
+                        or recent_motion_audit.get("yaw_rate_p90_radps", 0.0)
+                        > 2.0 * args.stationary_yaw_rate_radps
+                    )
+                )
+                if moving:
+                    last_motion_evidence_ns = int(evidence_ns)
+                    stopped_episode_applied = False
+                    continue
+                if int(evidence_ns) - last_motion_evidence_ns < round(
+                    args.stationary_window_sec * 1e9
+                ):
+                    continue
+                if stopped_episode_applied:
+                    continue
+                fresh_stationary, stationarity_audit = _window_is_stationary(
+                    odometry,
+                    odometry_time_ns,
+                    end_time_ns=int(evidence_ns),
+                    window_sec=args.stationary_window_sec,
+                    maximum_linear_speed_mps=args.stationary_linear_speed_mps,
+                    maximum_yaw_rate_radps=args.stationary_yaw_rate_radps,
+                )
+                if not fresh_stationary:
+                    continue
+                window_sec = args.stationary_window_sec
         end_to_end_start = time.perf_counter_ns()
         previous_rotation = None if engine.rotation is None else engine.rotation.copy()
         previous_translation = (
@@ -160,12 +267,13 @@ def main() -> int:
         )
         previous_sequence = engine.sequence
         try:
-            query, audit = buffer.structural_query(
-                end_source_time_ns=int(evidence_ns),
-                window_sec=window_sec,
-                config=config,
-            )
             if engine.rotation is None and initialization is not None:
+                audit = {
+                    "schema": "g1_registered_map_query_audit_v1",
+                    "source": "accepted_ui_initialization_receipt",
+                    "start_source_time_ns": initialization.reference_time_ns,
+                    "end_source_time_ns": initialization.evidence_time_ns,
+                }
                 attempt = engine.initialize_from_ui(
                     map_T_local=initialization.map_T_local,
                     fitness=initialization.fitness,
@@ -178,26 +286,32 @@ def main() -> int:
                     # pretending wall-clock latency from another session.
                     application_time_ns=initialization.evidence_time_ns + 1,
                 )
-            elif engine.rotation is None:
-                attempt = engine.initialize(
-                    query,
-                    reference_time_ns=int(audit["start_source_time_ns"]),
-                    evidence_time_ns=int(evidence_ns),
-                    # The packet is replaced below with the measured replay age.
-                    application_time_ns=int(evidence_ns) + 1,
-                )
             else:
-                pose = buffer.pose_at(
-                    int(evidence_ns),
-                    maximum_age_ns=config.maximum_root_evidence_gap_ns,
+                query, audit = buffer.structural_query(
+                    end_source_time_ns=int(evidence_ns),
+                    window_sec=window_sec,
+                    config=config,
                 )
-                attempt = engine.track(
-                    query,
-                    local_position_xy_m=pose.position_xy_m,
-                    reference_time_ns=int(audit["start_source_time_ns"]),
-                    evidence_time_ns=int(evidence_ns),
-                    application_time_ns=int(evidence_ns) + 1,
-                )
+                if engine.rotation is None:
+                    attempt = engine.initialize(
+                        query,
+                        reference_time_ns=int(audit["start_source_time_ns"]),
+                        evidence_time_ns=int(evidence_ns),
+                        # The packet is replaced below with the measured replay age.
+                        application_time_ns=int(evidence_ns) + 1,
+                    )
+                else:
+                    pose = buffer.pose_at(
+                        int(evidence_ns),
+                        maximum_age_ns=config.maximum_root_evidence_gap_ns,
+                    )
+                    attempt = engine.track(
+                        query,
+                        local_position_xy_m=pose.position_xy_m,
+                        reference_time_ns=int(audit["start_source_time_ns"]),
+                        evidence_time_ns=int(evidence_ns),
+                        application_time_ns=int(evidence_ns) + 1,
+                    )
         except StructuralMapLocalizationError:
             continue
         end_to_end_ms = (time.perf_counter_ns() - end_to_end_start) * 1e-6
@@ -213,6 +327,13 @@ def main() -> int:
             engine.translation_m = previous_translation
             engine.sequence = previous_sequence
         if packet is not None:
+            if attempt.kind == "heading_only_tracking":
+                candidate_transform = np.asarray(
+                    attempt.report["candidate_map_T_local"], dtype=np.float64
+                )
+                packet = dataclasses.replace(packet, map_T_local=candidate_transform)
+                engine.rotation = candidate_transform[:2, :2].T.copy()
+                engine.translation_m = candidate_transform[:2, 3].copy()
             application_ns = int(evidence_ns) + max(1, round(end_to_end_ms * 1e6))
             packet = dataclasses.replace(
                 packet,
@@ -224,6 +345,7 @@ def main() -> int:
                 {
                     "schema": "g1_map_correction_replay_packet_v1",
                     "kind": attempt.kind,
+                    "treatment": args.treatment,
                     "evidence_time_ns": int(evidence_ns),
                     "end_to_end_runtime_ms": end_to_end_ms,
                     "payload_hex": payload.hex(),
@@ -233,6 +355,7 @@ def main() -> int:
         attempts.append(
             {
                 "kind": attempt.kind,
+                "treatment": args.treatment,
                 "accepted": accepted,
                 "rejection_reason": rejection_reason,
                 "reference_time_ns": attempt.reference_time_ns,
@@ -240,9 +363,22 @@ def main() -> int:
                 "algorithm_runtime_ms": attempt.runtime_ms,
                 "end_to_end_runtime_ms": end_to_end_ms,
                 "query_audit": audit,
+                "stationarity_audit": (
+                    stationarity_audit
+                    if args.treatment == "stopped-only-full-se2"
+                    and attempt.kind == "heading_only_tracking"
+                    else None
+                ),
                 "report": _json_safe(icp),
             }
         )
+        if (
+            args.treatment == "stopped-only-full-se2"
+            and attempt.kind == "heading_only_tracking"
+        ):
+            # One bounded decision per stationary episode.  A rejected attempt
+            # stays rejected until motion begins a new episode.
+            stopped_episode_applied = True
     if not attempts:
         raise ValueError("no map-correction attempt could be formed")
     runtimes = np.asarray([row["end_to_end_runtime_ms"] for row in attempts])
@@ -257,6 +393,14 @@ def main() -> int:
         "initialization_mode": (
             "ui_pin_locked" if initialization is not None else "automatic_global_search"
         ),
+        "treatment": args.treatment,
+        "treatment_contract": {
+            "correction_period_sec": args.correction_period_sec,
+            "stationary_window_sec": args.stationary_window_sec,
+            "stationary_linear_speed_mps": args.stationary_linear_speed_mps,
+            "stationary_yaw_rate_radps": args.stationary_yaw_rate_radps,
+            "motive_online_input": False,
+        },
         "initialization_receipt": (
             None
             if args.initialization_receipt is None
