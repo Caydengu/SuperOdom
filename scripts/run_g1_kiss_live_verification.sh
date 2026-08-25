@@ -170,6 +170,7 @@ if [[ "$integrated_robot_vlm" == true ]]; then
     [[ "$digest" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "integrated map digests must contain 64 hexadecimal characters" >&2; exit 2; }
   done
   robot_vlm_repo="$(realpath "$robot_vlm_repo")"
+  robot_vlm_python="$robot_vlm_repo/.venv/bin/python"
   glb="$(realpath "$glb")"
   surface_cache="$(realpath "$surface_cache")"
   structural_map="$(realpath "$structural_map")"
@@ -179,6 +180,7 @@ if [[ "$integrated_robot_vlm" == true ]]; then
   fi
   [[ -x "$robot_vlm_repo/deploy/g1/localize/run_live_humble.sh" ]] || { echo "prepared Humble UI launcher is missing" >&2; exit 2; }
   [[ -f "$robot_vlm_repo/scripts/probe_real_backend_localization.py" ]] || { echo "real-backend localization probe is missing" >&2; exit 2; }
+  [[ -x "$robot_vlm_python" ]] || { echo "prepared robot-vlm Python is missing: $robot_vlm_python" >&2; exit 2; }
   for path in "$glb" "$surface_cache" "$structural_map" "$map_artifact"; do [[ -f "$path" ]] || { echo "missing integrated input: $path" >&2; exit 2; }; done
   if [[ "$motive_mode" == required && ! -f "$motive_map_transform" ]]; then
     echo "missing integrated Motive evaluator input: $motive_map_transform" >&2
@@ -261,6 +263,7 @@ capture_readiness=first fresh and fully healthy HSROOT02 packet; robot must rema
 root_state_endpoint=tcp://127.0.0.1:$root_state_port
 integrated_robot_vlm=$integrated_robot_vlm
 robot_vlm_repo=$robot_vlm_repo
+robot_vlm_python=${robot_vlm_python:-disabled}
 glb=$glb
 glb_sha256=$glb_sha256
 surface_sha256=$surface_sha256
@@ -682,7 +685,7 @@ if [[ "$integrated_robot_vlm" == true ]]; then
     export ROBOT_VLM_REQUIRE_INERTIAL_HEADING=1
     export ROBOT_VLM_MAP_POSITION_POLICY=initialize_once_heading_only
     export ROBOT_VLM_MAP_ARTIFACT="$map_artifact"
-    PYTHONPATH=src uv run --frozen python scripts/probe_real_backend_localization.py \
+    PYTHONPATH=src "$robot_vlm_python" scripts/probe_real_backend_localization.py \
       --map-artifact "$map_artifact" \
       --expected-artifact-sha256 "${map_artifact_sha256,,}" \
       --duration-sec "$duration_sec" \
@@ -732,9 +735,18 @@ pathlib.Path(r"$run_dir/process_status.json").write_text(json.dumps({
   "robot_vlm_real_backend": $probe_status,
 }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 EOF
+set +e
 python3 "$script_dir/validate_g1_kiss_live_verification.py" \
   --run-dir "$run_dir" \
   --output "$run_dir/validation.json"
+validation_status=$?
+set -e
+if (( validation_status != 0 )); then
+  mark_runtime_failed validation \
+    "capture validation failed; inspect $run_dir/validation.json" \
+    implementation_failed
+  exit "$validation_status"
+fi
 if [[ "$integrated_robot_vlm" == true && "$motive_mode" == required ]]; then
   docker run --rm --entrypoint /bin/bash \
     --user "$(id -u):$(id -g)" \

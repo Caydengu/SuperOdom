@@ -5,6 +5,33 @@ from pathlib import Path
 from scripts import validate_g1_kiss_live_verification as validator
 
 
+def test_missing_optional_artifact_is_a_failed_check_not_a_validator_crash(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "robot-vlm-real-backend.json"
+    result = validator.load_optional_json(artifact)
+    assert result["status"] == "missing_or_invalid"
+    assert result["artifact"] == str(artifact)
+    assert "FileNotFoundError" in result["error"]
+
+
+def test_integrated_launcher_accepts_only_the_expected_live_stack_stop_signal() -> None:
+    healthy = {
+        "live_stack": 143,
+        "motive": 0,
+        "lowstate_recorder": 0,
+        "lowstate_relay": 0,
+        "rosbag": 0,
+        "robot_vlm_real_backend": 0,
+    }
+    assert validator.process_statuses_ok(healthy, integrated_robot_vlm=True)
+    assert not validator.process_statuses_ok(healthy, integrated_robot_vlm=False)
+    assert not validator.process_statuses_ok(
+        {**healthy, "robot_vlm_real_backend": 127},
+        integrated_robot_vlm=True,
+    )
+
+
 def test_no_motive_mode_qualifies_operation_without_claiming_absolute_accuracy(
     monkeypatch,
 ) -> None:

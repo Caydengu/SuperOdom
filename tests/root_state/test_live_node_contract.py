@@ -218,10 +218,15 @@ def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> N
     assert '"robot_python": "$robot_python"' in source
     assert "mark_runtime_failed map_initialization" in source
     assert "no accepted digest-bound map correction" in source
+    assert 'robot_vlm_python="$robot_vlm_repo/.venv/bin/python"' in source
+    assert 'PYTHONPATH=src "$robot_vlm_python"' in source
+    assert "PYTHONPATH=src uv run" not in source
     assert "[1/5] Verifying SSH access" in source
     assert "[2/5] Binding the physical robot fingerprint" in source
     assert "[5/5] Passive relay staged" in source
     assert "preflight_failed" in source
+    assert "mark_runtime_failed validation" in source
+    assert "capture validation failed" in source
     assert "wrong_robot_identity" in source
     assert "clock_probe" in source
     assert "infrastructure_failed" in source

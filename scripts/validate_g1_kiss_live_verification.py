@@ -24,6 +24,18 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def load_optional_json(path: Path) -> dict[str, Any]:
+    """Return an explicit failed artifact instead of aborting validation."""
+    try:
+        return load_json(path)
+    except (OSError, TypeError, ValueError) as error:
+        return {
+            "status": "missing_or_invalid",
+            "artifact": str(path),
+            "error": f"{type(error).__name__}: {error}",
+        }
+
+
 def bag_counts(metadata_path: Path) -> dict[str, int]:
     text = metadata_path.read_text(encoding="utf-8")
     counts: dict[str, int] = {}
@@ -56,6 +68,21 @@ def last_live_status(log_path: Path) -> dict[str, Any]:
     return last_schema_status(log_path, "g1_kiss_live_localization_status_v1")
 
 
+def process_statuses_ok(
+    statuses: dict[str, Any], *, integrated_robot_vlm: bool
+) -> bool:
+    for name, raw_status in statuses.items():
+        status = int(raw_status)
+        if name == "live_stack" and integrated_robot_vlm:
+            # The integrated launcher deliberately terminates the longer-lived
+            # producer after the bounded recorder and robot-vlm observer finish.
+            if status in {0, 130, 143}:
+                continue
+        if status != 0:
+            return False
+    return True
+
+
 def validate(run_dir: Path) -> dict[str, Any]:
     manifest = load_json(run_dir / "manifest.json")
     duration_sec = float(manifest["duration_sec"])
@@ -78,7 +105,10 @@ def validate(run_dir: Path) -> dict[str, Any]:
     published = int(stats["published"])
     lidar = int(stats["lidar"])
     availability = published / lidar if lidar else 0.0
-    process_ok = all(int(value) == 0 for value in process_status.values())
+    process_ok = process_statuses_ok(
+        process_status,
+        integrated_robot_vlm=bool(manifest.get("integrated_robot_vlm")),
+    )
     motive_ok = motive_mode == "disabled" or (
         bool(motive.get("connected"))
         and int(motive.get("resolved_rigid_body_id", -1)) == 42
@@ -142,7 +172,7 @@ def validate(run_dir: Path) -> dict[str, Any]:
             run_dir / "logs" / "map_stack.log",
             "g1_structural_map_localization_status_v1",
         )
-        robot_vlm = load_json(run_dir / "robot-vlm-real-backend.json")
+        robot_vlm = load_optional_json(run_dir / "robot-vlm-real-backend.json")
         expected_map_sha256 = str(manifest["structural_map_sha256"])
         expected_artifact_sha256 = str(manifest["map_artifact_sha256"])
         map_runtime = map_status.get("attempt_runtime_ms", {})
