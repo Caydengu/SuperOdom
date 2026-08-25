@@ -221,6 +221,9 @@ def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> N
     assert "[5/5] Passive relay staged" in source
     assert "preflight_failed" in source
     assert "wrong_robot_identity" in source
+    assert "clock_probe" in source
+    assert "infrastructure_failed" in source
+    assert "--timeout-sec 5" in source
     assert 'value["robot_machine_id_sha256"]' in source
     assert "ConnectTimeout=5" in source
     assert source.index("wait_for_root_state.py") < source.index(

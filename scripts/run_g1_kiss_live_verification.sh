@@ -365,7 +365,8 @@ PY
 mark_runtime_failed() {
   local stage=$1
   local detail=$2
-  python3 - "$run_dir/manifest.json" "$stage" "$detail" <<'PY'
+  local status=${3:-implementation_failed}
+  python3 - "$run_dir/manifest.json" "$stage" "$detail" "$status" <<'PY'
 import json
 import pathlib
 import sys
@@ -373,7 +374,7 @@ import time
 
 path = pathlib.Path(sys.argv[1])
 value = json.loads(path.read_text(encoding="utf-8"))
-value["status"] = "implementation_failed"
+value["status"] = sys.argv[4]
 value["failure_stage"] = sys.argv[2]
 value["failure_detail"] = sys.argv[3]
 value["failed_realtime_ns"] = time.time_ns()
@@ -463,10 +464,16 @@ for path in Path(sys.argv[1]).glob("*.py"):
         path.write_bytes(normalized)
 PY
 fi
-python3 "$script_dir/probe_g1_clock.py" \
+if ! python3 "$script_dir/probe_g1_clock.py" \
   --target "$robot_user@$robot_host" \
+  --timeout-sec 5 \
   --output "$run_dir/clock_probe.json" \
-  >"$run_dir/logs/clock_probe.log" 2>&1
+  >"$run_dir/logs/clock_probe.log" 2>&1; then
+  mark_runtime_failed clock_probe "bounded read-only SSH clock probe failed" infrastructure_failed
+  echo "G1 clock probe failed; inspect $run_dir/logs/clock_probe.log" >&2
+  tail -40 "$run_dir/logs/clock_probe.log" >&2
+  exit 4
+fi
 
 live_duration=$((10#$duration_sec + 15))
 if [[ "$integrated_robot_vlm" == true ]]; then
