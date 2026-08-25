@@ -91,7 +91,7 @@ def validate(run_dir: Path) -> dict[str, Any]:
         raise ValueError(f"unsupported Motive mode: {motive_mode}")
     process_status = load_json(run_dir / "process_status.json")
     motive = (
-        load_json(run_dir / "motive" / "summary.json")
+        load_optional_json(run_dir / "motive" / "summary.json")
         if motive_mode != "disabled"
         else {
             "status": "disabled",
@@ -230,7 +230,7 @@ def validate(run_dir: Path) -> dict[str, Any]:
         "checks": checks,
         "evidence_class": evidence_class if passed else "incomplete passive capture",
         "absolute_map_pose_accuracy_evaluated": False,
-        "external_ground_truth_recorded": motive_mode != "disabled",
+        "external_ground_truth_recorded": motive_mode != "disabled" and motive_ok,
         "hardware_actuation_clearance": False,
     }
 

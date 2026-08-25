@@ -474,7 +474,7 @@ else
   command_status=$?
   mark_preflight_failed remote_stage_copy "$command_status"
 fi
-if [[ "$motive_mode" == required ]]; then
+if [[ "$motive_mode" != disabled ]]; then
   ssh -o BatchMode=yes "$robot_user@$robot_host" \
     "test -d '$robot_localization_root/mocap_utils'"
   scp -q -r "$robot_user@$robot_host:$robot_localization_root/mocap_utils" "$run_dir/runtime/"

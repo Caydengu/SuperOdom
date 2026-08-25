@@ -243,6 +243,14 @@ def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> N
     assert "rt/lowcmd" not in source
     assert "run_amo" not in source
 
+    mocap_copy = source.index(
+        '"test -d \'$robot_localization_root/mocap_utils\'"'
+    )
+    staging_condition = source.rfind('if [[ "$motive_mode"', 0, mocap_copy)
+    assert source[staging_condition:mocap_copy].startswith(
+        'if [[ "$motive_mode" != disabled ]]; then'
+    )
+
 
 def test_fieldbay_wrapper_pins_the_complete_g1_4123_treatment() -> None:
     source = (ROOT / "scripts/run_g1_4123_robot_vlm_fieldbay.sh").read_text()
