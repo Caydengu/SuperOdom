@@ -17,7 +17,7 @@ Options:
   --robot-user USER               default: unitree
   --offboard-robot-address IP     default: resolve from route to robot
   --robot-dds-interface IFACE     default: eth0
-  --robot-python PATH             default: egonav-deploy Python on G1
+  --robot-python PATH             default: G1-4123 sim2sim Python
   --ros-domain-id ID              default: 0
   --lowstate-port PORT            default: 5589
   --root-state-port PORT          default: 5575
@@ -31,7 +31,7 @@ robot_host=192.168.123.164
 robot_user=unitree
 offboard_robot_address=""
 robot_dds_interface=eth0
-robot_python=/home/unitree/miniforge3/envs/egonav-deploy/bin/python
+robot_python=/home/unitree/miniconda3/envs/sim2sim/bin/python
 ros_domain_id=0
 lowstate_port=5589
 root_state_port=5575
@@ -110,9 +110,11 @@ EOF
   exit 0
 fi
 
-ssh -o BatchMode=yes "$robot_user@$robot_host" \
+ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
+  "$robot_user@$robot_host" \
   "test -x '$robot_python' && '$robot_python' -c 'import unitree_sdk2py' && mkdir -p '$remote_stage'"
-scp -q -r "$repo_root/g1_root_state_bridge/g1_root_state_bridge" \
+scp -q -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
+  -r "$repo_root/g1_root_state_bridge/g1_root_state_bridge" \
   "$robot_user@$robot_host:$remote_stage/"
 
 relay_pid=""
@@ -137,7 +139,8 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-ssh -o BatchMode=yes "$robot_user@$robot_host" \
+ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=2 -o ServerAliveCountMax=2 \
+  "$robot_user@$robot_host" \
   "echo \$\$ > '$remote_pid_file'; exec timeout --signal=TERM --kill-after=5s '${duration_sec}s' bash -lc '$relay_command'" &
 relay_pid=$!
 sleep 2

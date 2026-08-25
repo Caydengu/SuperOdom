@@ -16,6 +16,7 @@ Options:
   --robot-host IP              default: 192.168.123.164
   --robot-user USER            default: unitree
   --robot-dds-interface IFACE  default: eth0
+  --robot-python PATH          default: G1-4123 sim2sim Python
   --motive-server IP           default: 172.24.68.77
   --motive-mode MODE           required|disabled; default: required
   --rigid-body-id ID           default: 42
@@ -49,7 +50,7 @@ capture_class=stationary
 robot_host=192.168.123.164
 robot_user=unitree
 robot_dds_interface=eth0
-robot_python=/home/unitree/miniforge3/envs/egonav-deploy/bin/python
+robot_python=/home/unitree/miniconda3/envs/sim2sim/bin/python
 robot_localization_root=/home/unitree/geo-179/G1_localization
 motive_server=172.24.68.77
 motive_mode=required
@@ -85,6 +86,7 @@ while (( $# )); do
     --robot-host) robot_host=$2; shift 2 ;;
     --robot-user) robot_user=$2; shift 2 ;;
     --robot-dds-interface) robot_dds_interface=$2; shift 2 ;;
+    --robot-python) robot_python=$2; shift 2 ;;
     --motive-server) motive_server=$2; shift 2 ;;
     --motive-mode) motive_mode=$2; shift 2 ;;
     --rigid-body-id) rigid_body_id=$2; shift 2 ;;
@@ -136,6 +138,7 @@ done
 for value in "$network_interface" "$robot_dds_interface" "$robot_user" "$rigid_body_name"; do
   [[ "$value" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "unsafe identifier: $value" >&2; exit 2; }
 done
+[[ "$robot_python" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "invalid robot Python path" >&2; exit 2; }
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
@@ -289,6 +292,7 @@ pathlib.Path(r"$run_dir/manifest.json").write_text(json.dumps({
   "robot_identity": "G1-4123",
   "robot_host": "$robot_host",
   "robot_network_interface": "$network_interface",
+  "robot_python": "$robot_python",
   "motive_server": "$motive_server",
   "motive_client_address": "$motive_client_address",
   "rigid_body_id": $rigid_body_id,
@@ -315,11 +319,76 @@ EOF
 printf '%q ' "$script_dir/run_g1_kiss_live_verification.sh" "${original_args[@]}" >"$run_dir/command.txt"
 printf '\n' >>"$run_dir/command.txt"
 
-ssh -o BatchMode=yes "$robot_user@$robot_host" \
-  "test -x '$robot_python' && \
-   '$robot_python' -c 'import unitree_sdk2py' && \
-   mkdir -p '$remote_stage'"
-scp -q -r "$repo_root/g1_root_state_bridge/g1_root_state_bridge" "$robot_user@$robot_host:$remote_stage/"
+ssh_options=(
+  -o BatchMode=yes
+  -o ConnectTimeout=5
+  -o ServerAliveInterval=2
+  -o ServerAliveCountMax=2
+)
+robot_preflight_log="$run_dir/logs/robot_preflight.log"
+mark_preflight_failed() {
+  local stage=$1
+  local command_status=$2
+  python3 - "$run_dir/manifest.json" "$stage" "$command_status" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["status"] = "preflight_failed"
+value["failure_stage"] = sys.argv[2]
+value["failure_command_status"] = int(sys.argv[3])
+path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  echo "G1 preflight failed at '$stage' (status $command_status)." >&2
+  echo "Inspect $robot_preflight_log" >&2
+  if [[ -s "$robot_preflight_log" ]]; then
+    tail -40 "$robot_preflight_log" >&2
+  fi
+  exit 4
+}
+
+echo "[1/4] Verifying SSH access to $robot_user@$robot_host..."
+if ssh "${ssh_options[@]}" "$robot_user@$robot_host" true >>"$robot_preflight_log" 2>&1; then
+  echo "[1/4] SSH access verified."
+else
+  command_status=$?
+  mark_preflight_failed ssh_access "$command_status"
+fi
+
+echo "[2/4] Verifying onboard Python: $robot_python"
+if ssh "${ssh_options[@]}" "$robot_user@$robot_host" "test -x '$robot_python'" >>"$robot_preflight_log" 2>&1; then
+  echo "[2/4] Onboard Python verified."
+else
+  command_status=$?
+  mark_preflight_failed robot_python "$command_status"
+fi
+
+echo "[3/4] Verifying passive LowState SDK imports..."
+if ssh "${ssh_options[@]}" "$robot_user@$robot_host" \
+  "'$robot_python' -c 'from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber; from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_'" \
+  >>"$robot_preflight_log" 2>&1; then
+  echo "[3/4] Passive LowState SDK imports verified."
+else
+  command_status=$?
+  mark_preflight_failed unitree_sdk_import "$command_status"
+fi
+
+echo "[4/4] Staging the command-incapable LowState relay..."
+if ssh "${ssh_options[@]}" "$robot_user@$robot_host" "mkdir -p '$remote_stage'" >>"$robot_preflight_log" 2>&1; then
+  :
+else
+  command_status=$?
+  mark_preflight_failed remote_stage_create "$command_status"
+fi
+if scp -q "${ssh_options[@]}" -r "$repo_root/g1_root_state_bridge/g1_root_state_bridge" \
+  "$robot_user@$robot_host:$remote_stage/" >>"$robot_preflight_log" 2>&1; then
+  echo "[4/4] Passive relay staged."
+else
+  command_status=$?
+  mark_preflight_failed remote_stage_copy "$command_status"
+fi
 if [[ "$motive_mode" == required ]]; then
   ssh -o BatchMode=yes "$robot_user@$robot_host" \
     "test -d '$robot_localization_root/mocap_utils'"
@@ -349,6 +418,7 @@ fi
   --robot-host "$robot_host" \
   --robot-user "$robot_user" \
   --robot-dds-interface "$robot_dds_interface" \
+  --robot-python "$robot_python" \
   --ros-domain-id "$ros_domain_id" \
   --lowstate-port "$live_lowstate_port" \
   --root-state-port "$root_state_port" \

@@ -151,6 +151,7 @@ def test_passive_launcher_names_no_policy_or_command_channel() -> None:
     assert "rt/lowcmd" not in source
     assert "run_amo" not in source
     assert "command_capability=structurally_unavailable" in source
+    assert "/home/unitree/miniconda3/envs/sim2sim/bin/python" in source
 
 
 def test_passive_launcher_cleanup_owns_both_producer_and_relay() -> None:
@@ -212,6 +213,13 @@ def test_live_verification_records_proven_inputs_outputs_and_motive_truth() -> N
     assert "tcp://127.0.0.1:5575" in source
     assert '--endpoint "tcp://127.0.0.1:$root_state_port"' in source
     assert "READY FOR OPERATOR-CONTROLLED AMO" in source
+    assert 'robot_python=/home/unitree/miniconda3/envs/sim2sim/bin/python' in source
+    assert '--robot-python "$robot_python"' in source
+    assert '"robot_python": "$robot_python"' in source
+    assert "[1/4] Verifying SSH access" in source
+    assert "[4/4] Passive relay staged" in source
+    assert "preflight_failed" in source
+    assert "ConnectTimeout=5" in source
     assert source.index("wait_for_root_state.py") < source.index(
         "record_natnet_reference.py"
     )
@@ -224,6 +232,7 @@ def test_fieldbay_wrapper_pins_the_complete_g1_4123_treatment() -> None:
     assert "run_g1_kiss_live_verification.sh" in source
     assert "--integrated-robot-vlm" in source
     assert "G1_PELVIS_F_4123" in source
+    assert "/home/unitree/miniconda3/envs/sim2sim/bin/python" in source
     assert "--rigid-body-id 42" in source
     assert "634e7de6eb7023b67beef8048c9b6d0aa26752641b40fe6adab34c8ce329e8cf" in source
     assert "f2e9c375304a3ceb0dd8998d58cda861b529ee8b4668e64c5dd7cf0d6cae2fc4" in source
