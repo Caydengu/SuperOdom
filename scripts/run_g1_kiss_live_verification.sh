@@ -598,6 +598,9 @@ if [[ "$integrated_robot_vlm" == true ]]; then
     exit 5
   fi
   initialization_receipt="$run_dir/runtime/ui-initialization.json"
+  # Initialization-only is the selected deployment treatment. Keep the map
+  # lane alive for receipts/UI provenance, but do not spend the bounded walk
+  # recomputing corrections that the Robot-VLM consumer intentionally ignores.
   "$script_dir/run_g1_structural_map_shadow.sh" \
     --network-interface "$network_interface" \
     --map "$structural_map" \
@@ -607,6 +610,7 @@ if [[ "$integrated_robot_vlm" == true ]]; then
     --ros-domain-id "$ros_domain_id" \
     --root-state-port "$root_state_port" \
     --map-correction-port "$map_correction_port" \
+    --tracking-period-sec "$live_duration" \
     --initialization-mode ui \
     --ui-initialization-receipt "$initialization_receipt" \
     --expected-glb-sha256 "${glb_sha256,,}" \

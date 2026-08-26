@@ -276,6 +276,7 @@ def test_integrated_live_launcher_freezes_the_initial_map_transform() -> None:
     source = (ROOT / "scripts/run_g1_kiss_live_verification.sh").read_text()
     assert "ROBOT_VLM_MAP_POSITION_POLICY=initialization_only" in source
     assert "ROBOT_VLM_MAP_POSITION_POLICY=initialize_once_heading_only" not in source
+    assert '--tracking-period-sec "$live_duration"' in source
 
 
 def test_live_verification_validator_enforces_g1_4123_admission() -> None:
