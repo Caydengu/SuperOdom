@@ -27,7 +27,7 @@ done
 [[ "$root_state_port" != "$lowstate_port" ]] || { echo "root-state and LowState ports must differ" >&2; exit 2; }
 [[ -z "$container_name" || "$container_name" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid container name" >&2; exit 2; }
 
-image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.4.0-humble}"
+image="${G1_LOCALIZATION_IMAGE:-tml/g1-kiss-localization:1.5.4-ui-relocalization-humble}"
 cyclonedds_uri="<CycloneDDS><Domain id=\"any\"><General><Interfaces><NetworkInterface name=\"$network_interface\" /></Interfaces></General></Domain></CycloneDDS>"
 docker_args=(run --rm)
 if [[ -n "$container_name" ]]; then

@@ -355,7 +355,7 @@ def run_node(args: argparse.Namespace) -> None:
 
         def _try_ui_initialization(self) -> None:
             receipt_path = args.ui_initialization_receipt
-            if receipt_path is None or self.engine.rotation is not None:
+            if receipt_path is None:
                 return
             try:
                 stat = receipt_path.stat()
@@ -403,26 +403,35 @@ def run_node(args: argparse.Namespace) -> None:
                 self._record_rejection(f"ui_receipt:{reason}")
                 return
             assert snapshot is not None
-            if self.bound_epoch is None or snapshot.packet.source_epoch != self.bound_epoch:
-                self._record_rejection("ui_receipt:local_epoch_unbound")
-                return
             try:
-                attempt = self.engine.initialize_from_ui(
-                    map_T_local=receipt.map_T_local,
-                    fitness=receipt.fitness,
-                    rmse_m=receipt.rmse_m,
-                    min_eig=receipt.min_eig,
-                    cond_number=receipt.cond_number,
-                    reference_time_ns=receipt.reference_time_ns,
-                    evidence_time_ns=receipt.evidence_time_ns,
-                    application_time_ns=now_ns,
-                )
+                # Serialize explicit re-anchoring with background tracking so a
+                # single RVMAP001 sequence always names one complete map anchor.
+                with self.lock:
+                    if (
+                        self.bound_epoch is None
+                        or snapshot.packet.source_epoch != self.bound_epoch
+                    ):
+                        self._record_rejection("ui_receipt:local_epoch_unbound")
+                        return
+                    relocalizing = self.engine.rotation is not None
+                    attempt = self.engine.initialize_from_ui(
+                        map_T_local=receipt.map_T_local,
+                        fitness=receipt.fitness,
+                        rmse_m=receipt.rmse_m,
+                        min_eig=receipt.min_eig,
+                        cond_number=receipt.cond_number,
+                        reference_time_ns=receipt.reference_time_ns,
+                        evidence_time_ns=receipt.evidence_time_ns,
+                        application_time_ns=now_ns,
+                    )
+                    self.last_ui_content_sha256 = receipt.content_sha256
+                    self.last_ui_file_signature = signature
+                    self.stats["ui_receipts_accepted"] += 1
+                    if relocalizing:
+                        self.stats["ui_relocalizations_accepted"] += 1
             except StructuralMapLocalizationError as error:
                 self._record_rejection(f"ui_receipt:{error}")
                 return
-            self.last_ui_content_sha256 = receipt.content_sha256
-            self.last_ui_file_signature = signature
-            self.stats["ui_receipts_accepted"] += 1
             self._publish_attempt(attempt)
 
         def _worker(self) -> None:

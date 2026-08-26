@@ -29,6 +29,11 @@ class MapCorrectionHealth(IntFlag):
     OBSERVABILITY_VALID = 1 << 2
     MAP_IDENTITY_VALID = 1 << 3
     CLOCK_VALID = 1 << 4
+    # The existing UI receipt has independently passed the operator pin,
+    # bounded-ICP, identity, freshness, and observability gates. Consumers may
+    # replace their map anchor for this packet; background tracking packets do
+    # not carry this bit.
+    OPERATOR_ANCHOR = 1 << 5
 
 
 REQUIRED_MAP_CORRECTION_HEALTH = (

@@ -158,3 +158,13 @@ def test_structural_map_shutdown_is_idempotent_after_sigint() -> None:
     ).read_text()
     assert "except KeyboardInterrupt:" in source
     assert "if rclpy.ok():" in source
+
+
+def test_structural_map_node_keeps_watching_for_operator_relocalization() -> None:
+    source = (
+        ROOT / "g1_root_state_bridge/g1_root_state_bridge/structural_map_node.py"
+    ).read_text()
+    assert "if receipt_path is None:" in source
+    assert "receipt_path is None or self.engine.rotation is not None" not in source
+    assert 'self.stats["ui_relocalizations_accepted"] += 1' in source
+    assert "Serialize explicit re-anchoring with background tracking" in source

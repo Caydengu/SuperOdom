@@ -11,6 +11,7 @@ from g1_root_state_bridge.map_protocol import (
     MAP_CORRECTION_V1_NUM_BYTES,
     REQUIRED_MAP_CORRECTION_HEALTH,
     MapCorrectionPacketV1,
+    MapCorrectionHealth,
     deserialize_map_correction_v1,
     serialize_map_correction_v1,
 )
@@ -52,12 +53,21 @@ def _packet(now_ns: int = 30) -> MapCorrectionPacketV1:
 
 def test_map_packet_round_trip_is_fixed_and_versioned() -> None:
     packet = _packet()
+    packet = MapCorrectionPacketV1(
+        **{
+            **packet.__dict__,
+            "health_flags": MapCorrectionHealth(
+                packet.health_flags | MapCorrectionHealth.OPERATOR_ANCHOR
+            ),
+        }
+    )
     payload = serialize_map_correction_v1(packet)
     assert len(payload) == MAP_CORRECTION_V1_NUM_BYTES == 176
     decoded = deserialize_map_correction_v1(payload)
     assert decoded.sequence == packet.sequence
     assert decoded.local_source_epoch == packet.local_source_epoch
     assert decoded.map_digest == packet.map_digest
+    assert decoded.health_flags & MapCorrectionHealth.OPERATOR_ANCHOR
     np.testing.assert_allclose(decoded.map_T_local, packet.map_T_local, atol=1e-6)
 
 

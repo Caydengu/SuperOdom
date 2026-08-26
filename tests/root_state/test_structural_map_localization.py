@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 
 import numpy as np
+from g1_root_state_bridge.map_protocol import MapCorrectionHealth
 from g1_root_state_bridge.structural_map_localization import (
     AutomaticMapCorrectionEngine,
     StructuralMapConfig,
@@ -98,6 +99,9 @@ def test_heading_update_preserves_current_map_position(tmp_path: Path) -> None:
     )
     assert attempt.accepted
     assert attempt.packet is not None
+    assert not (
+        attempt.packet.health_flags & MapCorrectionHealth.OPERATOR_ANCHOR
+    )
     new_position = (
         attempt.packet.map_T_local[:3, :3]
         @ np.asarray((local_position[0], local_position[1], 0.0))
@@ -114,6 +118,59 @@ def test_heading_update_preserves_current_map_position(tmp_path: Path) -> None:
         attempt.packet.map_T_local,
         atol=1e-6,
     )
+
+
+def test_repeated_ui_receipt_emits_explicit_operator_reanchor(tmp_path: Path) -> None:
+    map_path = tmp_path / "map.npz"
+    np.savez(
+        map_path,
+        map_xy_all_5cm=np.asarray(
+            ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)), dtype=np.float32
+        ),
+    )
+    engine = AutomaticMapCorrectionEngine(map_path=map_path)
+    engine.bind_local_epoch(3)
+
+    first_transform = np.eye(4)
+    first_transform[:2, 3] = (1.0, 2.0)
+    first = engine.initialize_from_ui(
+        map_T_local=first_transform,
+        fitness=0.8,
+        rmse_m=0.02,
+        min_eig=0.08,
+        cond_number=20.0,
+        reference_time_ns=900_000_000,
+        evidence_time_ns=1_000_000_000,
+        application_time_ns=1_100_000_000,
+    )
+
+    second_transform = np.eye(4)
+    yaw = math.radians(35.0)
+    second_transform[:2, :2] = (
+        (math.cos(yaw), -math.sin(yaw)),
+        (math.sin(yaw), math.cos(yaw)),
+    )
+    second_transform[:2, 3] = (-2.0, 4.0)
+    second = engine.initialize_from_ui(
+        map_T_local=second_transform,
+        fitness=0.82,
+        rmse_m=0.018,
+        min_eig=0.09,
+        cond_number=18.0,
+        reference_time_ns=1_900_000_000,
+        evidence_time_ns=2_000_000_000,
+        application_time_ns=2_100_000_000,
+    )
+
+    assert first.kind == "ui_pin_locked_initialization"
+    assert second.kind == "ui_pin_locked_relocalization"
+    assert first.packet is not None
+    assert second.packet is not None
+    assert first.packet.sequence == 1
+    assert second.packet.sequence == 2
+    assert first.packet.health_flags & MapCorrectionHealth.OPERATOR_ANCHOR
+    assert second.packet.health_flags & MapCorrectionHealth.OPERATOR_ANCHOR
+    np.testing.assert_allclose(second.packet.map_T_local, second_transform, atol=1e-6)
 
 
 def test_global_localization_configuration_preserves_frozen_yaw_grid() -> None:

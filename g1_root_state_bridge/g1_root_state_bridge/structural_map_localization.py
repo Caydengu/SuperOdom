@@ -537,6 +537,7 @@ class AutomaticMapCorrectionEngine:
         application_time_ns: int,
         icp: dict[str, object],
         maximum_age_ns: int | None = None,
+        operator_anchor: bool = False,
     ) -> MapCorrectionPacketV1:
         if self.local_source_epoch is None:
             raise StructuralMapLocalizationError("local source epoch is not bound")
@@ -554,6 +555,15 @@ class AutomaticMapCorrectionEngine:
         self.sequence += 1
         variance = max(float(icp["rmse_m"]) ** 2, 1e-4)
         yaw_variance = max(math.radians(1.0) ** 2, variance / 4.0)
+        health_flags = (
+            MapCorrectionHealth.ICP_CONVERGED
+            | MapCorrectionHealth.INLIERS_VALID
+            | MapCorrectionHealth.OBSERVABILITY_VALID
+            | MapCorrectionHealth.MAP_IDENTITY_VALID
+            | MapCorrectionHealth.CLOCK_VALID
+        )
+        if operator_anchor:
+            health_flags |= MapCorrectionHealth.OPERATOR_ANCHOR
         return MapCorrectionPacketV1(
             sequence=self.sequence,
             map_epoch=self.map_epoch,
@@ -563,13 +573,7 @@ class AutomaticMapCorrectionEngine:
             evidence_time_ns=evidence_time_ns,
             application_time_ns=application_time_ns,
             publish_time_ns=application_time_ns,
-            health_flags=(
-                MapCorrectionHealth.ICP_CONVERGED
-                | MapCorrectionHealth.INLIERS_VALID
-                | MapCorrectionHealth.OBSERVABILITY_VALID
-                | MapCorrectionHealth.MAP_IDENTITY_VALID
-                | MapCorrectionHealth.CLOCK_VALID
-            ),
+            health_flags=health_flags,
             map_T_local=map_transform_from_row_se2(rotation, translation_m),
             fitness=float(icp["inlier_fraction"]),
             rmse_m=float(icp["rmse_m"]),
@@ -632,8 +636,9 @@ class AutomaticMapCorrectionEngine:
         evidence_time_ns: int,
         application_time_ns: int | None = None,
     ) -> MapCorrectionAttempt:
-        """Initialize once from Gio's independently gated, pin-locked 3D ICP."""
+        """Apply Gio's independently gated, pin-locked 3D ICP map anchor."""
         start = time.perf_counter_ns()
+        relocalizing = self.rotation is not None
         transform = np.asarray(map_T_local, dtype=np.float64)
         if transform.shape != (4, 4) or not np.all(np.isfinite(transform)):
             raise StructuralMapLocalizationError("UI map transform must be finite 4x4")
@@ -671,12 +676,17 @@ class AutomaticMapCorrectionEngine:
             application_time_ns=now_ns,
             icp=report,
             maximum_age_ns=self.config.maximum_ui_initialization_age_ns,
+            operator_anchor=True,
         )
         self.rotation = rotation
         self.translation_m = translation
         runtime_ms = (time.perf_counter_ns() - start) * 1e-6
         return MapCorrectionAttempt(
-            kind="ui_pin_locked_initialization",
+            kind=(
+                "ui_pin_locked_relocalization"
+                if relocalizing
+                else "ui_pin_locked_initialization"
+            ),
             accepted=True,
             rejection_reason=None,
             reference_time_ns=reference_time_ns,
