@@ -115,6 +115,10 @@ def validate(run_dir: Path) -> dict[str, Any]:
         and str(motive.get("rigid_body_name")) == "G1_PELVIS_F_4123"
         and float(motive.get("tracking_coverage", 0.0)) >= 0.99
     )
+    motive_recorded = motive_mode != "disabled" and (
+        bool(motive.get("connected"))
+        and int(motive.get("frames_written", 0)) > 0
+    )
     lowstate_ok = (
         int(lowstate.get("accepted", 0)) >= duration_sec * 200.0
         and int(lowstate.get("invalid", 1)) == 0
@@ -230,7 +234,8 @@ def validate(run_dir: Path) -> dict[str, Any]:
         "checks": checks,
         "evidence_class": evidence_class if passed else "incomplete passive capture",
         "absolute_map_pose_accuracy_evaluated": False,
-        "external_ground_truth_recorded": motive_mode != "disabled" and motive_ok,
+        "external_ground_truth_recorded": motive_recorded,
+        "external_ground_truth_admitted": motive_mode != "disabled" and motive_ok,
         "hardware_actuation_clearance": False,
     }
 

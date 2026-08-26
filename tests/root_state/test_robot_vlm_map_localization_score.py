@@ -41,7 +41,7 @@ def test_motive_front_plane_offset_and_yaw_enter_canonical_map() -> None:
 
 
 def test_absolute_map_score_does_not_align_away_global_error() -> None:
-    reference_time = np.asarray((1_000_000_000, 2_000_000_000, 3_000_000_000))
+    reference_time = np.asarray((1_000_000_000, 1_100_000_000, 1_200_000_000))
     reference_position = np.asarray(((0.0, 0.0, 0.8), (1.0, 0.0, 0.8), (2.0, 0.0, 0.8)))
     reference_yaw = np.zeros(3)
     trace = [
@@ -64,4 +64,35 @@ def test_absolute_map_score_does_not_align_away_global_error() -> None:
     assert metrics["absolute_yaw_error_deg"]["rmse"] == pytest.approx(
         math.degrees(0.1)
     )
+    assert len(enriched) == 3
+
+
+def test_absolute_map_score_does_not_interpolate_through_motive_outage() -> None:
+    reference_time = np.asarray(
+        (1_000_000_000, 1_100_000_000, 2_100_000_000, 2_200_000_000)
+    )
+    reference_position = np.asarray(
+        ((0.0, 0.0, 0.8), (0.1, 0.0, 0.8), (1.1, 0.0, 0.8), (1.2, 0.0, 0.8))
+    )
+    reference_yaw = np.zeros(4)
+    query_time = (1_050_000_000, 1_100_000_000, 1_500_000_000, 2_150_000_000)
+    trace = [
+        {
+            "receipt_realtime_ns": time_ns + 1_000_000,
+            "local_estimate_realtime_ns": time_ns,
+            "base_pose_xyyaw": [position, 0.0, 0.0],
+        }
+        for time_ns, position in zip(query_time, (0.05, 0.1, 0.5, 1.15))
+    ]
+    metrics, enriched = score_map_trace(
+        trace,
+        reference_time_ns=reference_time,
+        reference_position_xyz_m=reference_position,
+        reference_yaw_rad=reference_yaw,
+        T_map_px=np.eye(3),
+        maximum_reference_gap_sec=0.30,
+    )
+    assert metrics["source_timestamped_pose_count"] == 3
+    assert metrics["motive_reference_gap_rejected_count"] == 1
+    assert metrics["motive_overlap_fraction"] == pytest.approx(3 / 4)
     assert len(enriched) == 3

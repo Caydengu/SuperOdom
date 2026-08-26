@@ -164,8 +164,11 @@ def score_map_trace(
     reference_position_xyz_m: np.ndarray,
     reference_yaw_rad: np.ndarray,
     T_map_px: np.ndarray,
+    maximum_reference_gap_sec: float = 0.30,
 ) -> tuple[dict, list[dict]]:
     """Compare absolute map poses; no origin reset, ICP fit, or yaw alignment."""
+    if not math.isfinite(maximum_reference_gap_sec) or maximum_reference_gap_sec <= 0.0:
+        raise ValueError("maximum Motive reference gap must be finite and positive")
     usable = [
         row
         for row in trace_rows
@@ -178,8 +181,25 @@ def score_map_trace(
     admitted = (query >= reference_time_ns[0]) & (query <= reference_time_ns[-1])
     usable = [row for row, keep in zip(usable, admitted) if keep]
     query = query[admitted]
+    right = np.searchsorted(reference_time_ns, query, side="left")
+    exact = (right < len(reference_time_ns)) & (
+        reference_time_ns[np.minimum(right, len(reference_time_ns) - 1)] == query
+    )
+    bracketed = (right > 0) & (right < len(reference_time_ns))
+    safe_right = np.minimum(right, len(reference_time_ns) - 1)
+    safe_left = np.maximum(right - 1, 0)
+    bracketing_gap_s = (
+        reference_time_ns[safe_right] - reference_time_ns[safe_left]
+    ).astype(np.float64) * 1e-9
+    reference_fresh = exact | (
+        bracketed & (bracketing_gap_s <= maximum_reference_gap_sec)
+    )
+    reference_gap_rejected_count = int(np.count_nonzero(~reference_fresh))
+    usable = [row for row, keep in zip(usable, reference_fresh) if keep]
+    query = query[reference_fresh]
+    admitted_bracketing_gap_s = bracketing_gap_s[reference_fresh]
     if len(query) < 3:
-        raise ValueError("fewer than three map poses overlap Motive")
+        raise ValueError("fewer than three map poses have fresh Motive reference")
     origin = int(reference_time_ns[0])
     x = (reference_time_ns - origin).astype(np.float64) * 1e-9
     q = (query - origin).astype(np.float64) * 1e-9
@@ -236,6 +256,12 @@ def score_map_trace(
         "valid_pose_count": sum(row.get("base_pose_xyyaw") is not None for row in trace_rows),
         "source_timestamped_pose_count": len(usable),
         "motive_overlap_fraction": len(usable) / max(1, len(trace_rows)),
+        "motive_reference_gap_rejected_count": reference_gap_rejected_count,
+        "maximum_admitted_motive_bracketing_gap_s": (
+            float(np.max(admitted_bracketing_gap_s))
+            if len(admitted_bracketing_gap_s)
+            else 0.0
+        ),
         "absolute_planar_error_m": _distribution(planar_error),
         "absolute_yaw_error_deg": _distribution(np.degrees(yaw_error)),
         "estimate_excursion_m": _distribution(np.linalg.norm(estimate_delta, axis=1)),
@@ -271,6 +297,7 @@ def main() -> int:
     parser.add_argument("--maximum-yaw-error-deg", type=float, default=15.0)
     parser.add_argument("--maximum-source-gap-sec", type=float, default=0.30)
     parser.add_argument("--maximum-motive-clock-residual-p95-ms", type=float, default=5.0)
+    parser.add_argument("--maximum-motive-reference-gap-sec", type=float, default=0.30)
     parser.add_argument("--stationary-maximum-terminal-drift-m", type=float, default=0.03)
     parser.add_argument("--stationary-maximum-terminal-yaw-drift-deg", type=float, default=2.0)
     args = parser.parse_args()
@@ -322,6 +349,7 @@ def main() -> int:
         reference_position_xyz_m=reference_position,
         reference_yaw_rad=reference_yaw,
         T_map_px=T_map_px,
+        maximum_reference_gap_sec=args.maximum_motive_reference_gap_sec,
     )
     failures = []
     if metrics["motive_overlap_fraction"] < args.minimum_overlap_fraction:
@@ -375,6 +403,7 @@ def main() -> int:
             "maximum_yaw_error_deg": args.maximum_yaw_error_deg,
             "maximum_source_gap_sec": args.maximum_source_gap_sec,
             "maximum_motive_clock_residual_p95_ms": args.maximum_motive_clock_residual_p95_ms,
+            "maximum_motive_reference_gap_sec": args.maximum_motive_reference_gap_sec,
             "stationary_maximum_terminal_drift_m": args.stationary_maximum_terminal_drift_m,
             "stationary_maximum_terminal_yaw_drift_deg": args.stationary_maximum_terminal_yaw_drift_deg,
         },
